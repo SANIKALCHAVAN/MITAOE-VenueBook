@@ -1,7 +1,9 @@
 import { createClient } from "@supabase/supabase-js";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import dotenv from "dotenv";
-import { generateApprovalPdf } from "./documentGenerator.js";
+import { generateApprovalPdf, DOCUMENTS_DIR, sanitizeFilename } from "./documentGenerator.js";
 
 // Load environment variables with override so local .env takes precedence
 dotenv.config({ override: true });
@@ -356,6 +358,112 @@ export async function updateVenueSupabase(id, venueData) {
 }
 
 /**
+ * Retrieve single booking by ID from Supabase with full relational joins
+ */
+export async function getBookingByIdSupabase(bookingId) {
+  if (!isSupabaseConfigured) return null;
+
+  try {
+    const { data: b, error } = await supabaseAdmin
+      .from("bookings")
+      .select(`
+        *,
+        venues:venue_id (id, name, venue_type, location, capacity, facilities),
+        profiles:requester_id (id, full_name, role, prn, email, department),
+        reviewer:reviewed_by (id, full_name)
+      `)
+      .eq("id", bookingId)
+      .maybeSingle();
+
+    if (error || !b) return null;
+
+    let doc = null;
+    try {
+      const { data: docData } = await supabaseAdmin
+        .from("booking_documents")
+        .select("*")
+        .eq("booking_id", bookingId)
+        .eq("document_type", "approval_summary")
+        .maybeSingle();
+      doc = docData || null;
+    } catch {}
+
+    const safeId = sanitizeFilename(b.id);
+    const localFileName = `VenueBook_Approval_${safeId}.pdf`;
+    const localFilePath = path.join(DOCUMENTS_DIR, localFileName);
+
+    if (!doc && fs.existsSync(localFilePath)) {
+      const stat = fs.statSync(localFilePath);
+      doc = {
+        id: "doc-" + safeId,
+        booking_id: b.id,
+        document_reference: `DOC-MIT-${safeId.substring(0, 8).toUpperCase()}`,
+        approval_reference: `APP-MIT-${safeId.substring(0, 8).toUpperCase()}`,
+        document_type: "approval_summary",
+        file_path: localFilePath,
+        file_name: localFileName,
+        file_size: stat.size,
+        mime_type: "application/pdf",
+        generation_status: "ready",
+        generated_at: stat.mtime.toISOString(),
+        error_message: null
+      };
+    }
+
+    let cleanPurpose = b.purpose || "";
+    let extractedEndDate = b.end_date || b.event_date;
+    if (cleanPurpose.startsWith("[End Date: ")) {
+      const match = cleanPurpose.match(/^\[End Date:\s*([^\]]+)\]\n?/);
+      if (match) {
+        extractedEndDate = match[1].trim();
+        cleanPurpose = cleanPurpose.replace(/^\[End Date:\s*[^\]]+\]\n?/, "");
+      }
+    }
+
+    let facilities = [];
+    if (b.venues?.facilities) {
+      facilities = typeof b.venues.facilities === "string" ? JSON.parse(b.venues.facilities) : b.venues.facilities;
+    }
+
+    return {
+      id: b.id,
+      venue_id: b.venue_id,
+      venue_name: b.venues?.name || "Campus Venue",
+      venue_category: b.venues?.venue_type || "Facility",
+      venue_location: b.venues?.location || "Campus",
+      venue_capacity: b.venues?.capacity || 0,
+      facilities,
+      requester_id: b.requester_id,
+      requester_name: b.profiles?.full_name || "Campus User",
+      requester_role: b.profiles?.role || "student",
+      requester_prn: b.profiles?.prn || "",
+      requester_email: b.profiles?.email || "",
+      requester_department: b.profiles?.department || "",
+      event_name: b.event_title,
+      event_type: b.event_type,
+      event_date: b.event_date,
+      start_date: b.event_date,
+      end_date: extractedEndDate,
+      start_time: b.start_time,
+      end_time: b.end_time,
+      attendee_count: b.expected_attendees,
+      purpose: cleanPurpose,
+      status: b.status,
+      rejection_reason: b.rejection_reason,
+      reviewed_by: b.reviewed_by,
+      reviewer_name: b.reviewer?.full_name || "Campus Administrator",
+      reviewed_at: b.reviewed_at,
+      created_at: b.created_at,
+      updated_at: b.updated_at,
+      document: doc
+    };
+  } catch (err) {
+    console.error("Error in getBookingByIdSupabase:", err.message);
+    return null;
+  }
+}
+
+/**
  * Bookings: Retrieve from Supabase with joins and data isolation.
  */
 export async function getBookingsSupabase({ userId, role, status, venue_id, date_from, date_to, search }) {
@@ -378,7 +486,9 @@ export async function getBookingsSupabase({ userId, role, status, venue_id, date
   if (venue_id && venue_id !== "all") query = query.eq("venue_id", venue_id);
   if (date_from) query = query.gte("event_date", date_from);
   if (date_to) query = query.lte("event_date", date_to);
-  if (search) query = query.ilike("event_title", `%${search}%`);
+  if (search) {
+    query = query.or(`event_title.ilike.%${search}%,id.eq.${search}`);
+  }
 
   const { data, error } = await query;
   if (error) throw new Error(`Could not retrieve bookings: ${error.message}`);
@@ -414,6 +524,26 @@ export async function getBookingsSupabase({ userId, role, status, venue_id, date
       }
     }
 
+    let existingDoc = docMap[b.id] || null;
+    if (!existingDoc && b.status === "approved") {
+      const safeId = sanitizeFilename(b.id);
+      const localFilePath = path.join(DOCUMENTS_DIR, `VenueBook_Approval_${safeId}.pdf`);
+      if (fs.existsSync(localFilePath)) {
+        const stat = fs.statSync(localFilePath);
+        existingDoc = {
+          id: "doc-" + safeId,
+          booking_id: b.id,
+          document_reference: `DOC-MIT-${safeId.substring(0, 8).toUpperCase()}`,
+          approval_reference: `APP-MIT-${safeId.substring(0, 8).toUpperCase()}`,
+          generation_status: "ready",
+          generated_at: stat.mtime.toISOString(),
+          file_name: `VenueBook_Approval_${safeId}.pdf`,
+          file_size: stat.size,
+          error_message: null
+        };
+      }
+    }
+
     return {
       id: b.id,
       venue_id: b.venue_id,
@@ -441,16 +571,16 @@ export async function getBookingsSupabase({ userId, role, status, venue_id, date
       reviewer_name: b.reviewer?.full_name || "",
       reviewed_at: b.reviewed_at,
       created_at: b.created_at,
-      document: docMap[b.id] ? {
-        id: docMap[b.id].id,
+      document: existingDoc ? {
+        id: existingDoc.id,
         booking_id: b.id,
-        document_reference: docMap[b.id].document_reference,
-        approval_reference: docMap[b.id].approval_reference,
-        generation_status: docMap[b.id].generation_status,
-        generated_at: docMap[b.id].generated_at,
-        file_name: docMap[b.id].file_name,
-        file_size: docMap[b.id].file_size,
-        error_message: docMap[b.id].error_message
+        document_reference: existingDoc.document_reference,
+        approval_reference: existingDoc.approval_reference,
+        generation_status: existingDoc.generation_status,
+        generated_at: existingDoc.generated_at,
+        file_name: existingDoc.file_name,
+        file_size: existingDoc.file_size,
+        error_message: existingDoc.error_message
       } : null
     };
   });
@@ -542,14 +672,16 @@ export async function createBookingSupabase({ requester_id, venue_id, event_name
  */
 export async function approveBookingSupabase({ bookingId, adminId }) {
   // 1. Idempotency check: if booking is already approved, retrieve existing document and return
-  const { data: existingBooking } = await supabaseAdmin
-    .from("bookings")
-    .select("id, status")
-    .eq("id", bookingId)
-    .maybeSingle();
+  const existingBooking = await getBookingByIdSupabase(bookingId);
 
   if (existingBooking && existingBooking.status === "approved") {
-    const doc = await getBookingDocumentSupabase(bookingId);
+    let doc = await getBookingDocumentSupabase(bookingId);
+    if (!doc || doc.generation_status === "failed") {
+      try {
+        const retryRes = await retryGenerateBookingDocumentSupabase({ bookingId, adminId });
+        doc = retryRes.document;
+      } catch {}
+    }
     return { booking: existingBooking, document: doc, isExisting: true };
   }
 
@@ -567,9 +699,8 @@ export async function approveBookingSupabase({ bookingId, adminId }) {
     throw err;
   }
 
-  // Fetch hydrated booking record
-  const bookings = await getBookingsSupabase({ userId: adminId, role: "admin", search: bookingId });
-  const hydratedBooking = bookings.find((b) => b.id === bookingId) || null;
+  // Fetch fully hydrated booking record directly by ID
+  const hydratedBooking = await getBookingByIdSupabase(bookingId);
 
   let docRecord = null;
   const docRef = `DOC-MIT-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
@@ -582,51 +713,60 @@ export async function approveBookingSupabase({ bookingId, adminId }) {
         approvalReference: appRef
       });
 
-      const { data: savedDoc } = await supabaseAdmin
-        .from("booking_documents")
-        .upsert({
-          booking_id: bookingId,
-          document_reference: docRef,
-          approval_reference: appRef,
-          document_type: "approval_summary",
-          file_path: pdfResult.filePath,
-          file_name: pdfResult.fileName,
-          file_size: pdfResult.fileSize,
-          mime_type: "application/pdf",
-          generation_status: "ready",
-          generated_at: new Date().toISOString(),
-          generated_by: adminId,
-          error_message: null
-        }, { onConflict: "booking_id, document_type" })
-        .select()
-        .single();
+      docRecord = {
+        id: "doc-" + bookingId,
+        booking_id: bookingId,
+        document_reference: docRef,
+        approval_reference: appRef,
+        document_type: "approval_summary",
+        file_path: pdfResult.filePath,
+        file_name: pdfResult.fileName,
+        file_size: pdfResult.fileSize,
+        mime_type: "application/pdf",
+        generation_status: "ready",
+        generated_at: new Date().toISOString(),
+        generated_by: adminId,
+        error_message: null
+      };
 
-      docRecord = savedDoc;
+      try {
+        const { data: savedDoc } = await supabaseAdmin
+          .from("booking_documents")
+          .upsert(docRecord, { onConflict: "booking_id, document_type" })
+          .select()
+          .maybeSingle();
+
+        if (savedDoc) docRecord = savedDoc;
+      } catch {
+        // Continue with local docRecord if table not yet migrated in Supabase
+      }
     } catch (pdfErr) {
       console.error("PDF generation failed in Supabase flow:", pdfErr.message);
-      const { data: savedDoc } = await supabaseAdmin
-        .from("booking_documents")
-        .upsert({
-          booking_id: bookingId,
-          document_reference: docRef,
-          approval_reference: appRef,
-          document_type: "approval_summary",
-          file_path: "",
-          file_name: "",
-          file_size: 0,
-          mime_type: "application/pdf",
-          generation_status: "failed",
-          generated_by: adminId,
-          error_message: pdfErr.message
-        }, { onConflict: "booking_id, document_type" })
-        .select()
-        .maybeSingle();
+      docRecord = {
+        id: "doc-" + bookingId,
+        booking_id: bookingId,
+        document_reference: docRef,
+        approval_reference: appRef,
+        document_type: "approval_summary",
+        file_path: "",
+        file_name: "",
+        file_size: 0,
+        mime_type: "application/pdf",
+        generation_status: "failed",
+        generated_by: adminId,
+        error_message: pdfErr.message
+      };
 
-      docRecord = savedDoc;
+      try {
+        await supabaseAdmin
+          .from("booking_documents")
+          .upsert(docRecord, { onConflict: "booking_id, document_type" });
+      } catch {}
     }
   }
 
-  return { booking: hydratedBooking, document: docRecord, isExisting: false };
+  const finalHydrated = (await getBookingByIdSupabase(bookingId)) || hydratedBooking;
+  return { booking: finalHydrated, document: docRecord, isExisting: false };
 }
 
 export async function getBookingDocumentSupabase(bookingId) {
@@ -637,15 +777,35 @@ export async function getBookingDocumentSupabase(bookingId) {
       .eq("booking_id", bookingId)
       .eq("document_type", "approval_summary")
       .maybeSingle();
-    return data || null;
-  } catch {
-    return null;
+    if (data) return data;
+  } catch {}
+
+  const safeId = sanitizeFilename(bookingId);
+  const localFileName = `VenueBook_Approval_${safeId}.pdf`;
+  const localFilePath = path.join(DOCUMENTS_DIR, localFileName);
+  if (fs.existsSync(localFilePath)) {
+    const stat = fs.statSync(localFilePath);
+    return {
+      id: "doc-" + safeId,
+      booking_id: bookingId,
+      document_reference: `DOC-MIT-${safeId.substring(0, 8).toUpperCase()}`,
+      approval_reference: `APP-MIT-${safeId.substring(0, 8).toUpperCase()}`,
+      document_type: "approval_summary",
+      file_path: localFilePath,
+      file_name: localFileName,
+      file_size: stat.size,
+      mime_type: "application/pdf",
+      generation_status: "ready",
+      generated_at: stat.mtime.toISOString(),
+      error_message: null
+    };
   }
+
+  return null;
 }
 
 export async function retryGenerateBookingDocumentSupabase({ bookingId, adminId }) {
-  const bookings = await getBookingsSupabase({ userId: adminId, role: "admin", search: bookingId });
-  const hydratedBooking = bookings.find((b) => b.id === bookingId);
+  const hydratedBooking = await getBookingByIdSupabase(bookingId);
   if (!hydratedBooking) throw new Error("Booking not found");
   if (hydratedBooking.status !== "approved") {
     throw new Error(`Cannot generate approval document for a booking that is ${hydratedBooking.status}`);
@@ -661,39 +821,39 @@ export async function retryGenerateBookingDocumentSupabase({ bookingId, adminId 
       approvalReference: appRef
     });
 
-    const { data: savedDoc, error } = await supabaseAdmin
-      .from("booking_documents")
-      .upsert({
-        booking_id: bookingId,
-        document_reference: docRef,
-        approval_reference: appRef,
-        document_type: "approval_summary",
-        file_path: pdfResult.filePath,
-        file_name: pdfResult.fileName,
-        file_size: pdfResult.fileSize,
-        mime_type: "application/pdf",
-        generation_status: "ready",
-        generated_at: new Date().toISOString(),
-        generated_by: adminId,
-        error_message: null
-      }, { onConflict: "booking_id, document_type" })
-      .select()
-      .single();
+    const docRecord = {
+      id: existingDoc?.id || "doc-" + bookingId,
+      booking_id: bookingId,
+      document_reference: docRef,
+      approval_reference: appRef,
+      document_type: "approval_summary",
+      file_path: pdfResult.filePath,
+      file_name: pdfResult.fileName,
+      file_size: pdfResult.fileSize,
+      mime_type: "application/pdf",
+      generation_status: "ready",
+      generated_at: new Date().toISOString(),
+      generated_by: adminId,
+      error_message: null
+    };
 
-    if (error) throw error;
-    return { booking: hydratedBooking, document: savedDoc };
+    try {
+      const { data: savedDoc } = await supabaseAdmin
+        .from("booking_documents")
+        .upsert(docRecord, { onConflict: "booking_id, document_type" })
+        .select()
+        .maybeSingle();
+
+      if (savedDoc) Object.assign(docRecord, savedDoc);
+    } catch {}
+
+    return {
+      booking: await getBookingByIdSupabase(bookingId),
+      document: docRecord,
+      message: "Approval document generated successfully"
+    };
   } catch (err) {
-    await supabaseAdmin
-      .from("booking_documents")
-      .upsert({
-        booking_id: bookingId,
-        document_reference: docRef,
-        approval_reference: appRef,
-        document_type: "approval_summary",
-        generation_status: "failed",
-        error_message: err.message
-      }, { onConflict: "booking_id, document_type" });
-    throw err;
+    throw new Error(`Failed to generate document: ${err.message}`);
   }
 }
 

@@ -16,6 +16,7 @@ import {
   createVenueSupabase,
   updateVenueSupabase,
   getBookingsSupabase,
+  getBookingByIdSupabase,
   createBookingSupabase,
   approveBookingSupabase,
   rejectBookingSupabase,
@@ -521,8 +522,7 @@ app.get("/api/bookings/:id/document", authenticate, async (req, res) => {
     let document = null;
 
     if (await useSupabase()) {
-      const bookings = await getBookingsSupabase({ userId: req.user.id, role: req.user.role, search: bookingId });
-      booking = bookings.find((b) => b.id === bookingId);
+      booking = await getBookingByIdSupabase(bookingId);
       if (!booking) {
         return res.status(404).json({ error: "Booking not found" });
       }
@@ -545,8 +545,25 @@ app.get("/api/bookings/:id/document", authenticate, async (req, res) => {
       return res.status(400).json({ error: `No approval summary document exists for a booking with status '${booking.status}'` });
     }
 
-    if (!document) {
-      return res.status(404).json({ error: "Approval summary document has not been generated for this booking yet" });
+    // Auto-generate if missing or not ready
+    if (!document || document.generation_status !== "ready") {
+      const safeId = sanitizeFilename(booking.id);
+      const pdfResult = await generateApprovalPdf(booking, {
+        documentReference: document?.document_reference,
+        approvalReference: document?.approval_reference
+      });
+
+      document = {
+        id: document?.id || "doc-" + safeId,
+        booking_id: booking.id,
+        document_reference: pdfResult.documentReference,
+        approval_reference: pdfResult.approvalReference,
+        generation_status: "ready",
+        file_path: pdfResult.filePath,
+        file_name: pdfResult.fileName,
+        file_size: pdfResult.fileSize,
+        generated_at: new Date().toISOString()
+      };
     }
 
     res.json({ document });
@@ -564,8 +581,7 @@ app.get("/api/bookings/:id/document/download", authenticate, async (req, res) =>
     let document = null;
 
     if (await useSupabase()) {
-      const bookings = await getBookingsSupabase({ userId: req.user.id, role: req.user.role, search: bookingId });
-      booking = bookings.find((b) => b.id === bookingId);
+      booking = await getBookingByIdSupabase(bookingId);
       if (!booking) {
         return res.status(404).json({ error: "Booking not found" });
       }
@@ -604,8 +620,14 @@ app.get("/api/bookings/:id/document/download", authenticate, async (req, res) =>
     }
 
     const isPreview = req.query.preview === "true" || req.query.inline === "true";
+    const stat = fs.statSync(targetFilePath);
+
     res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Length", stat.size);
     res.setHeader("Content-Disposition", `${isPreview ? "inline" : "attachment"}; filename="${expectedFileName}"`);
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", "private, no-cache, no-transform");
+
     fs.createReadStream(targetFilePath).pipe(res);
   } catch (err) {
     handleApiError(res, err, 500);
@@ -620,8 +642,7 @@ app.post("/api/bookings/:id/document/retry", authenticate, async (req, res) => {
   try {
     let booking = null;
     if (await useSupabase()) {
-      const bookings = await getBookingsSupabase({ userId: req.user.id, role: req.user.role, search: bookingId });
-      booking = bookings.find((b) => b.id === bookingId);
+      booking = await getBookingByIdSupabase(bookingId);
       if (!booking) return res.status(404).json({ error: "Booking not found" });
       if (req.user.role !== "admin" && booking.requester_id !== req.user.id) {
         return res.status(403).json({ error: "Access forbidden: You are not authorized to retry this document" });
@@ -648,11 +669,11 @@ app.post("/api/bookings/:id/document/retry", authenticate, async (req, res) => {
     }
 
     const result = await retryGenerateBookingDocumentSqlite({ bookingId, adminId: req.user.id, ipAddress });
-    return res.json({
+    res.json({
       success: true,
       booking: result.booking,
       document: result.document,
-      message: "Booking approval summary regenerated successfully."
+      message: result.message
     });
   } catch (err) {
     handleApiError(res, err, 500);

@@ -167,45 +167,23 @@ export const api = {
 
   async downloadBookingDocument(bookingId, { preview = false } = {}) {
     const token = getStoredToken();
-    const headers = {};
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
-    }
-
-    const endpoint = `/api/bookings/${bookingId}/document/download${preview ? "?preview=true" : ""}`;
-    const response = await fetch(endpoint, {
-      method: "GET",
-      headers
-    });
-
-    if (!response.ok) {
-      let errorMsg = "Failed to download document";
-      try {
-        const errJson = await response.json();
-        errorMsg = errJson.error || errorMsg;
-      } catch {
-        // fallback
-      }
-      throw new Error(errorMsg);
-    }
-
-    const blob = await response.blob();
-    const blobUrl = window.URL.createObjectURL(blob);
+    const endpoint = `/api/bookings/${bookingId}/document/download?token=${encodeURIComponent(token || "")}${preview ? "&preview=true" : ""}`;
 
     if (preview) {
-      window.open(blobUrl, "_blank");
-    } else {
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `VenueBook_Approval_${bookingId}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      window.open(endpoint, "_blank");
+      return;
     }
 
+    // Trigger direct, reliable download via browser
+    const a = document.createElement("a");
+    a.style.display = "none";
+    a.href = endpoint;
+    a.setAttribute("download", `VenueBook_Approval_${bookingId}.pdf`);
+    document.body.appendChild(a);
+    a.click();
     setTimeout(() => {
-      window.URL.revokeObjectURL(blobUrl);
-    }, 10000);
+      try { document.body.removeChild(a); } catch {}
+    }, 1500);
   },
 
   getDocumentDownloadUrl(bookingId, { preview = false } = {}) {
