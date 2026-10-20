@@ -17,6 +17,11 @@ function futureDate(days) {
 
 const fmtDate = (value) =>
   value ? new Date(`${value}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "—";
+const fmtDateRange = (startDate, endDate) => {
+  if (!startDate) return "—";
+  if (!endDate || endDate === startDate) return fmtDate(startDate);
+  return `${fmtDate(startDate)} → ${fmtDate(endDate)}`;
+};
 const fmtTime = (value) =>
   value ? new Date(`2000-01-01T${value}`).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" }) : "—";
 const statusClass = (s) => `status status-${s || "pending"}`;
@@ -64,7 +69,8 @@ export default function App() {
 
   // Booking Form State
   const [form, setForm] = useState({
-    venue_id: "", event_name: "", event_type: "Academic", event_date: futureDate(1),
+    venue_id: "", event_name: "", event_type: "Academic",
+    start_date: futureDate(1), end_date: futureDate(1), event_date: futureDate(1),
     start_time: "10:00", end_time: "11:00", attendee_count: "25", purpose: ""
   });
 
@@ -229,8 +235,21 @@ export default function App() {
     }
 
     if (!form.venue_id) { setNotice("Choose a venue before submitting."); return; }
-    if (form.start_time >= form.end_time) { setNotice("End time must be strictly later than start time."); return; }
-    if (new Date(`${form.event_date}T${form.start_time}`) <= new Date()) { setNotice("Please choose a future date and time."); return; }
+    const startDate = form.start_date || form.event_date;
+    const endDate = form.end_date || startDate;
+
+    if (endDate < startDate) {
+      setNotice("Ending date cannot be earlier than starting date.");
+      return;
+    }
+    if (startDate === endDate && form.start_time >= form.end_time) {
+      setNotice("End time must be strictly later than start time for single-day events.");
+      return;
+    }
+    if (new Date(`${startDate}T${form.start_time}`) <= new Date()) {
+      setNotice("Event start date and time must be in the future.");
+      return;
+    }
 
     const targetVenue = venues.find((v) => v.id === form.venue_id);
     if (!targetVenue) { setNotice("Selected venue could not be found."); return; }
@@ -248,7 +267,9 @@ export default function App() {
         venue_id: form.venue_id,
         event_name: form.event_name.trim(),
         event_type: form.event_type,
-        event_date: form.event_date,
+        start_date: startDate,
+        end_date: endDate,
+        event_date: startDate,
         start_time: form.start_time,
         end_time: form.end_time,
         attendee_count: attendees,
@@ -258,7 +279,8 @@ export default function App() {
       setFormOpen(false);
       setForm({
         venue_id: "", event_name: "", event_type: "Academic",
-        event_date: futureDate(1), start_time: "10:00", end_time: "11:00",
+        start_date: futureDate(1), end_date: futureDate(1), event_date: futureDate(1),
+        start_time: "10:00", end_time: "11:00",
         attendee_count: "25", purpose: ""
       });
       setNotice("Booking request submitted successfully! It is now pending administrator approval.");
@@ -1781,8 +1803,12 @@ export default function App() {
                   <strong>{approvalReviewBooking.venue_name}</strong>
                 </div>
                 <div className="review-cell">
-                  <span>REQUESTED DATE</span>
-                  <strong>{fmtDate(approvalReviewBooking.event_date)}</strong>
+                  <span>STARTING DATE</span>
+                  <strong>{fmtDate(approvalReviewBooking.start_date || approvalReviewBooking.event_date)}</strong>
+                </div>
+                <div className="review-cell">
+                  <span>ENDING DATE</span>
+                  <strong>{fmtDate(approvalReviewBooking.end_date || approvalReviewBooking.start_date || approvalReviewBooking.event_date)}</strong>
                 </div>
                 <div className="review-cell">
                   <span>RESERVATION WINDOW</span>
@@ -1890,35 +1916,54 @@ export default function App() {
 
               <div className="form-row">
                 <label>
-                  Event Date
+                  Starting Date
                   <input
                     type="date"
                     required
                     min={futureDate(0)}
-                    value={form.event_date}
-                    onChange={(e) => setForm({ ...form, event_date: e.target.value })}
+                    value={form.start_date || form.event_date}
+                    onChange={(e) => {
+                      const newStart = e.target.value;
+                      setForm((prev) => ({
+                        ...prev,
+                        start_date: newStart,
+                        event_date: newStart,
+                        end_date: prev.end_date && prev.end_date < newStart ? newStart : prev.end_date || newStart
+                      }));
+                    }}
                   />
                 </label>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                  <label>
-                    Start
-                    <input
-                      type="time"
-                      required
-                      value={form.start_time}
-                      onChange={(e) => setForm({ ...form, start_time: e.target.value })}
-                    />
-                  </label>
-                  <label>
-                    End
-                    <input
-                      type="time"
-                      required
-                      value={form.end_time}
-                      onChange={(e) => setForm({ ...form, end_time: e.target.value })}
-                    />
-                  </label>
-                </div>
+                <label>
+                  Ending Date
+                  <input
+                    type="date"
+                    required
+                    min={form.start_date || form.event_date || futureDate(0)}
+                    value={form.end_date || form.start_date || form.event_date}
+                    onChange={(e) => setForm({ ...form, end_date: e.target.value })}
+                  />
+                </label>
+              </div>
+
+              <div className="form-row">
+                <label>
+                  Start Time
+                  <input
+                    type="time"
+                    required
+                    value={form.start_time}
+                    onChange={(e) => setForm({ ...form, start_time: e.target.value })}
+                  />
+                </label>
+                <label>
+                  End Time
+                  <input
+                    type="time"
+                    required
+                    value={form.end_time}
+                    onChange={(e) => setForm({ ...form, end_time: e.target.value })}
+                  />
+                </label>
               </div>
 
               <label>
@@ -1968,7 +2013,7 @@ export default function App() {
             >
               <div style={{ background: "#fbfbfd", padding: "12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "11px" }}>
                 <strong>Requester:</strong> {rejectTargetBooking.requester_name} ({rejectTargetBooking.requester_role})<br />
-                <strong>Venue:</strong> {rejectTargetBooking.venue_name} on {fmtDate(rejectTargetBooking.event_date)} ({fmtTime(rejectTargetBooking.start_time)} - {fmtTime(rejectTargetBooking.end_time)})
+                <strong>Venue:</strong> {rejectTargetBooking.venue_name} ({fmtDateRange(rejectTargetBooking.start_date || rejectTargetBooking.event_date, rejectTargetBooking.end_date)}) [{fmtTime(rejectTargetBooking.start_time)} - {fmtTime(rejectTargetBooking.end_time)}]
               </div>
 
               <label>
@@ -2407,7 +2452,7 @@ function BookingTable({ bookings, onApprove, onReject, onCancel, currentUserId, 
               </td>
               <td>
                 <div className="date-cell">
-                  <strong>{fmtDate(b.event_date)}</strong>
+                  <strong>{fmtDateRange(b.start_date || b.event_date, b.end_date)}</strong>
                   <span>{fmtTime(b.start_time)} – {fmtTime(b.end_time)}</span>
                 </div>
               </td>

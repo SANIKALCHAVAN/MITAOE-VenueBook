@@ -239,4 +239,50 @@ describe("Phase 3 & 4: Booking Workflow, Validation & Conflict Prevention", () =
     assert.ok(stats.approvedBookings >= 1);
     assert.ok(stats.rejectedRequests >= 1);
   });
+
+  test("20. Multi-day booking with start_date and end_date is persisted and validated", () => {
+    const futureStart = new Date();
+    futureStart.setDate(futureStart.getDate() + 600);
+    const startDateStr = futureStart.toISOString().split("T")[0];
+    const futureEnd = new Date(futureStart);
+    futureEnd.setDate(futureEnd.getDate() + 2);
+    const endDateStr = futureEnd.toISOString().split("T")[0];
+
+    const booking = createBooking({
+      requester_id: student.id,
+      venue_id: "v1",
+      event_name: "MITAOE National Hackathon 2026",
+      event_type: "Workshop",
+      start_date: startDateStr,
+      end_date: endDateStr,
+      start_time: "09:00",
+      end_time: "18:00",
+      attendee_count: 300,
+      purpose: "3-day continuous hackathon."
+    });
+
+    assert.ok(booking.id);
+    assert.strictEqual(booking.start_date, startDateStr);
+    assert.strictEqual(booking.end_date, endDateStr);
+    assert.strictEqual(booking.event_date, startDateStr);
+
+    // Ending date cannot precede starting date
+    assert.throws(
+      () => {
+        createBooking({
+          requester_id: student.id,
+          venue_id: "v1",
+          event_name: "Invalid Date Order",
+          event_type: "Workshop",
+          start_date: endDateStr,
+          end_date: startDateStr,
+          start_time: "09:00",
+          end_time: "18:00",
+          attendee_count: 50,
+          purpose: "Testing invalid date bounds."
+        });
+      },
+      /Ending date cannot be earlier than starting date/
+    );
+  });
 });

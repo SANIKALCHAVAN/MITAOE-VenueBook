@@ -381,38 +381,59 @@ export async function getBookingsSupabase({ userId, role, status, venue_id, date
   const { data, error } = await query;
   if (error) throw new Error(`Could not retrieve bookings: ${error.message}`);
 
-  return (data || []).map((b) => ({
-    id: b.id,
-    venue_id: b.venue_id,
-    venue_name: b.venues?.name || "Campus Venue",
-    venue_category: b.venues?.venue_type || "Facility",
-    venue_location: b.venues?.location || "Campus",
-    venue_capacity: b.venues?.capacity || 0,
-    requester_id: b.requester_id,
-    requester_name: b.profiles?.full_name || "Campus User",
-    requester_role: b.profiles?.role || "student",
-    requester_prn: b.profiles?.prn || "",
-    requester_email: b.profiles?.email || "",
-    requester_department: b.profiles?.department || "",
-    event_name: b.event_title,
-    event_type: b.event_type,
-    event_date: b.event_date,
-    start_time: b.start_time,
-    end_time: b.end_time,
-    attendee_count: b.expected_attendees,
-    purpose: b.purpose,
-    status: b.status,
-    rejection_reason: b.rejection_reason,
-    reviewer_name: b.reviewer?.full_name || "",
-    reviewed_at: b.reviewed_at,
-    created_at: b.created_at
-  }));
+  return (data || []).map((b) => {
+    let cleanPurpose = b.purpose || "";
+    let extractedEndDate = b.end_date || b.event_date;
+    if (cleanPurpose.startsWith("[End Date: ")) {
+      const match = cleanPurpose.match(/^\[End Date:\s*([^\]]+)\]\n?/);
+      if (match) {
+        extractedEndDate = match[1].trim();
+        cleanPurpose = cleanPurpose.replace(/^\[End Date:\s*[^\]]+\]\n?/, "");
+      }
+    }
+
+    return {
+      id: b.id,
+      venue_id: b.venue_id,
+      venue_name: b.venues?.name || "Campus Venue",
+      venue_category: b.venues?.venue_type || "Facility",
+      venue_location: b.venues?.location || "Campus",
+      venue_capacity: b.venues?.capacity || 0,
+      requester_id: b.requester_id,
+      requester_name: b.profiles?.full_name || "Campus User",
+      requester_role: b.profiles?.role || "student",
+      requester_prn: b.profiles?.prn || "",
+      requester_email: b.profiles?.email || "",
+      requester_department: b.profiles?.department || "",
+      event_name: b.event_title,
+      event_type: b.event_type,
+      event_date: b.event_date,
+      start_date: b.event_date,
+      end_date: extractedEndDate,
+      start_time: b.start_time,
+      end_time: b.end_time,
+      attendee_count: b.expected_attendees,
+      purpose: cleanPurpose,
+      status: b.status,
+      rejection_reason: b.rejection_reason,
+      reviewer_name: b.reviewer?.full_name || "",
+      reviewed_at: b.reviewed_at,
+      created_at: b.created_at
+    };
+  });
 }
 
 /**
  * Bookings: Create booking in Supabase with validation.
  */
-export async function createBookingSupabase({ requester_id, venue_id, event_name, event_type, event_date, start_time, end_time, attendee_count, purpose }) {
+export async function createBookingSupabase({ requester_id, venue_id, event_name, event_type, start_date, end_date, event_date, start_time, end_time, attendee_count, purpose }) {
+  const startDate = start_date || event_date;
+  const endDate = end_date || startDate;
+
+  if (endDate < startDate) {
+    throw new Error("Ending date cannot be earlier than starting date");
+  }
+
   // Validate venue and capacity
   const { data: venue, error: venueErr } = await supabaseAdmin.from("venues").select("*").eq("id", venue_id).single();
   if (venueErr || !venue) throw new Error("Venue does not exist");
@@ -424,7 +445,7 @@ export async function createBookingSupabase({ requester_id, venue_id, event_name
     throw new Error(`Attendee count (${attendees}) exceeds maximum venue capacity (${venue.capacity})`);
   }
 
-  if (start_time >= end_time) {
+  if (startDate === endDate && start_time >= end_time) {
     throw new Error("Start time must be strictly earlier than end time");
   }
 
@@ -433,7 +454,7 @@ export async function createBookingSupabase({ requester_id, venue_id, event_name
     .from("bookings")
     .select("id, event_title, start_time, end_time")
     .eq("venue_id", venue_id)
-    .eq("event_date", event_date)
+    .eq("event_date", startDate)
     .eq("status", "approved")
     .lt("start_time", end_time)
     .gt("end_time", start_time);
@@ -445,16 +466,21 @@ export async function createBookingSupabase({ requester_id, venue_id, event_name
     throw err;
   }
 
+  let finalPurpose = purpose.trim();
+  if (endDate && endDate !== startDate) {
+    finalPurpose = `[End Date: ${endDate}]\n${finalPurpose}`;
+  }
+
   const payload = {
     venue_id,
     requester_id,
     event_title: event_name.trim(),
     event_type: event_type || "Academic",
-    event_date,
+    event_date: startDate,
     start_time,
     end_time,
     expected_attendees: attendees,
-    purpose: purpose.trim(),
+    purpose: finalPurpose,
     status: "pending"
   };
 
@@ -471,7 +497,10 @@ export async function createBookingSupabase({ requester_id, venue_id, event_name
   return {
     ...data,
     event_name: data.event_title,
-    attendee_count: data.expected_attendees
+    start_date: data.event_date,
+    end_date: endDate,
+    attendee_count: data.expected_attendees,
+    purpose: purpose.trim()
   };
 }
 

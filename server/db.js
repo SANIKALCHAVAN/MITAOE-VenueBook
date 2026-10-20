@@ -55,6 +55,7 @@ export function initSchema() {
       event_name TEXT NOT NULL,
       event_type TEXT NOT NULL,
       event_date TEXT NOT NULL,
+      end_date TEXT,
       start_time TEXT NOT NULL,
       end_time TEXT NOT NULL,
       attendee_count INTEGER NOT NULL CHECK(attendee_count > 0),
@@ -94,6 +95,12 @@ export function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_bookings_requester ON bookings(requester_id);
     CREATE INDEX IF NOT EXISTS idx_bookings_status ON bookings(status);
   `);
+
+  try {
+    db.exec("ALTER TABLE bookings ADD COLUMN end_date TEXT;");
+  } catch (e) {
+    // Column already exists
+  }
 
   seedData();
 }
@@ -360,7 +367,12 @@ export function getBookingById(id) {
     WHERE b.id = ?
   `).get(id);
 
-  return row || null;
+  if (!row) return null;
+  return {
+    ...row,
+    start_date: row.event_date,
+    end_date: row.end_date || row.event_date
+  };
 }
 
 export function getBookings({ userId = null, role = null, status = null, venue_id = null, date_from = null, date_to = null, search = null } = {}) {
@@ -395,8 +407,8 @@ export function getBookings({ userId = null, role = null, status = null, venue_i
   }
 
   if (date_from) {
-    query += " AND b.event_date >= ?";
-    params.push(date_from);
+    query += " AND (b.end_date >= ? OR (b.end_date IS NULL AND b.event_date >= ?))";
+    params.push(date_from, date_from);
   }
 
   if (date_to) {
@@ -411,10 +423,15 @@ export function getBookings({ userId = null, role = null, status = null, venue_i
   }
 
   query += " ORDER BY b.created_at DESC";
-  return db.prepare(query).all(...params);
+  const rows = db.prepare(query).all(...params);
+  return rows.map((r) => ({
+    ...r,
+    start_date: r.event_date,
+    end_date: r.end_date || r.event_date
+  }));
 }
 
-export function createBooking({ requester_id, venue_id, event_name, event_type, event_date, start_time, end_time, attendee_count, purpose }) {
+export function createBooking({ requester_id, venue_id, event_name, event_type, start_date, end_date, event_date, start_time, end_time, attendee_count, purpose }) {
   const venue = getVenueById(venue_id);
   if (!venue) throw new Error("Venue does not exist");
   if (!venue.is_active) throw new Error("Venue is currently inactive and cannot accept bookings");
@@ -425,12 +442,19 @@ export function createBooking({ requester_id, venue_id, event_name, event_type, 
     throw new Error(`Requested attendee count (${attendees}) exceeds venue maximum capacity (${venue.capacity})`);
   }
 
-  if (start_time >= end_time) {
+  const startDate = start_date || event_date;
+  const endDate = end_date || startDate;
+
+  if (endDate < startDate) {
+    throw new Error("Ending date cannot be earlier than starting date");
+  }
+
+  if (startDate === endDate && start_time >= end_time) {
     throw new Error("Start time must be strictly earlier than end time");
   }
 
   // Check past date/time validation
-  const startDateTime = new Date(`${event_date}T${start_time}`);
+  const startDateTime = new Date(`${startDate}T${start_time}`);
   if (isNaN(startDateTime.getTime())) throw new Error("Invalid event date or time format");
   const now = new Date();
   if (startDateTime <= now) {
@@ -442,11 +466,11 @@ export function createBooking({ requester_id, venue_id, event_name, event_type, 
     SELECT b.id, b.event_name, b.start_time, b.end_time
     FROM bookings b
     WHERE b.venue_id = ?
-      AND b.event_date = ?
+      AND (b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?)
       AND b.status = 'approved'
       AND b.start_time < ?
       AND b.end_time > ?
-  `).get(venue_id, event_date, end_time, start_time);
+  `).get(venue_id, endDate, startDate, end_time, start_time);
 
   if (conflict) {
     const err = new Error(`Time slot conflict: Venue is already booked for "${conflict.event_name}" (${conflict.start_time} - ${conflict.end_time})`);
@@ -458,9 +482,9 @@ export function createBooking({ requester_id, venue_id, event_name, event_type, 
   const nowIso = new Date().toISOString();
 
   db.prepare(`
-    INSERT INTO bookings (id, requester_id, venue_id, event_name, event_type, event_date, start_time, end_time, attendee_count, purpose, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-  `).run(id, requester_id, venue_id, event_name.trim(), event_type.trim(), event_date, start_time, end_time, attendees, purpose.trim(), nowIso, nowIso);
+    INSERT INTO bookings (id, requester_id, venue_id, event_name, event_type, event_date, end_date, start_time, end_time, attendee_count, purpose, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+  `).run(id, requester_id, venue_id, event_name.trim(), event_type.trim(), startDate, endDate, start_time, end_time, attendees, purpose.trim(), nowIso, nowIso);
 
   return getBookingById(id);
 }
@@ -491,12 +515,12 @@ export function approveBooking({ bookingId, adminId, ipAddress = "127.0.0.1" }) 
       FROM bookings b
       JOIN users u ON u.id = b.requester_id
       WHERE b.venue_id = ?
-        AND b.event_date = ?
+        AND (b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?)
         AND b.status = 'approved'
         AND b.id != ?
         AND b.start_time < ?
         AND b.end_time > ?
-    `).get(booking.venue_id, booking.event_date, booking.id, booking.end_time, booking.start_time);
+    `).get(booking.venue_id, booking.end_date || booking.event_date, booking.event_date, booking.id, booking.end_time, booking.start_time);
 
     if (conflict) {
       db.exec("ROLLBACK");

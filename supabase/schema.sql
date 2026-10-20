@@ -55,6 +55,7 @@ create table if not exists public.bookings (
   event_title text not null check (char_length(event_title) between 2 and 100),
   event_type text not null,
   event_date date not null,
+  end_date date default null,
   start_time time not null,
   end_time time not null,
   expected_attendees integer not null check (expected_attendees > 0),

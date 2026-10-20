@@ -403,12 +403,17 @@ app.get("/api/bookings", authenticate, async (req, res) => {
 
 app.post("/api/bookings", authenticate, async (req, res) => {
   try {
+    const startDate = req.body.start_date || req.body.event_date;
+    const endDate = req.body.end_date || startDate;
+
     const bookingPayload = {
       requester_id: req.user.id,
       venue_id: req.body.venue_id,
       event_name: req.body.event_name,
       event_type: req.body.event_type || "Academic",
-      event_date: req.body.event_date,
+      event_date: startDate,
+      start_date: startDate,
+      end_date: endDate,
       start_time: req.body.start_time,
       end_time: req.body.end_time,
       attendee_count: req.body.attendee_count,
