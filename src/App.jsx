@@ -40,6 +40,8 @@ export default function App() {
   const [selectedVenue, setSelectedVenue] = useState(null);
   const [selectedDetailVenue, setSelectedDetailVenue] = useState(null);
   const [approvalReviewBooking, setApprovalReviewBooking] = useState(null);
+  const [selectedDocumentBooking, setSelectedDocumentBooking] = useState(null);
+  const [docLoadingId, setDocLoadingId] = useState(null);
   const [faqOpenIndex, setFaqOpenIndex] = useState(0);
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState("All venues");
@@ -301,13 +303,63 @@ export default function App() {
 
   async function confirmApproval() {
     if (!isAdmin || !approvalReviewBooking) return;
+    const targetBooking = approvalReviewBooking;
+    setLoading(true);
     try {
-      await api.updateBookingStatus(approvalReviewBooking.id, "approved");
-      setNotice(`Booking "${approvalReviewBooking.event_name}" approved successfully.`);
+      const res = await api.updateBookingStatus(targetBooking.id, "approved");
+      setNotice(res.message || `Booking "${targetBooking.event_name}" approved successfully.`);
       setApprovalReviewBooking(null);
       await loadData();
+      // Present the generated document summary modal to the administrator
+      if (res.booking) {
+        setSelectedDocumentBooking({ ...res.booking, document: res.document });
+      } else {
+        setSelectedDocumentBooking({ ...targetBooking, status: "approved", document: res.document });
+      }
     } catch (err) {
       setNotice(`Approval error: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Document Operations (View, Download, Retry)
+  async function handleViewDocument(booking) {
+    setSelectedDocumentBooking(booking);
+    try {
+      const docRes = await api.getBookingDocument(booking.id);
+      if (docRes && docRes.document) {
+        setSelectedDocumentBooking((prev) => (prev && prev.id === booking.id ? { ...prev, document: docRes.document } : prev));
+      }
+    } catch {
+      // Keep existing booking document state if fetch fails
+    }
+  }
+
+  async function handleDownloadDocument(booking, preview = false) {
+    setDocLoadingId(booking.id);
+    try {
+      await api.downloadBookingDocument(booking.id, { preview });
+    } catch (err) {
+      setNotice(`Document download error: ${err.message}`);
+    } finally {
+      setDocLoadingId(null);
+    }
+  }
+
+  async function handleRetryDocument(booking) {
+    setDocLoadingId(booking.id);
+    try {
+      const res = await api.retryBookingDocument(booking.id);
+      setNotice(res.message || "Approval summary document generated successfully.");
+      await loadData();
+      if (selectedDocumentBooking?.id === booking.id) {
+        setSelectedDocumentBooking((prev) => (prev ? { ...prev, document: res.document } : null));
+      }
+    } catch (err) {
+      setNotice(`Document retry error: ${err.message}`);
+    } finally {
+      setDocLoadingId(null);
     }
   }
 
@@ -1165,6 +1217,10 @@ export default function App() {
                     <BookingTable
                       bookings={bookings.slice(0, 5)}
                       onCancel={cancelOwnBooking}
+                      onViewDocument={handleViewDocument}
+                      onDownloadDocument={handleDownloadDocument}
+                      onRetryDocument={handleRetryDocument}
+                      docLoadingId={docLoadingId}
                       currentUserId={user?.id}
                       isAdmin={false}
                       compact
@@ -1279,6 +1335,10 @@ export default function App() {
                 <BookingTable
                   bookings={bookings}
                   onCancel={cancelOwnBooking}
+                  onViewDocument={handleViewDocument}
+                  onDownloadDocument={handleDownloadDocument}
+                  onRetryDocument={handleRetryDocument}
+                  docLoadingId={docLoadingId}
                   currentUserId={user?.id}
                   isAdmin={false}
                 />
@@ -1369,6 +1429,10 @@ export default function App() {
                     bookings={bookings.filter((b) => bookingStatusFilter === "all" || b.status === bookingStatusFilter)}
                     onApprove={promptApprove}
                     onReject={promptReject}
+                    onViewDocument={handleViewDocument}
+                    onDownloadDocument={handleDownloadDocument}
+                    onRetryDocument={handleRetryDocument}
+                    docLoadingId={docLoadingId}
                     isAdmin={true}
                   />
                 </div>
@@ -2352,6 +2416,138 @@ export default function App() {
             </form>
           </Modal>
         )}
+
+        {/* 11. BOOKING APPROVAL SUMMARY DOCUMENT MODAL */}
+        {selectedDocumentBooking && (
+          <Modal
+            title="Booking Approval Summary"
+            subtitle="Official institutional confirmation document generated by MITAOE VenueBook."
+            onClose={() => setSelectedDocumentBooking(null)}
+          >
+            <div className="doc-sheet-card">
+              <div className="doc-sheet-header">
+                <div>
+                  <h4>MIT ACADEMY OF ENGINEERING (MITAOE)</h4>
+                  <span>VenueBook · Campus Booking System · Official Record</span>
+                </div>
+                <span className="doc-status-badge">● APPROVED</span>
+              </div>
+
+              <div className="doc-meta-cols">
+                <div className="doc-meta-col">
+                  <span>Document Ref</span>
+                  <strong>{selectedDocumentBooking.document?.document_reference || "DOC-MIT-PENDING"}</strong>
+                </div>
+                <div className="doc-meta-col">
+                  <span>Approval Ref</span>
+                  <strong>{selectedDocumentBooking.document?.approval_reference || "APP-MIT-PENDING"}</strong>
+                </div>
+                <div className="doc-meta-col">
+                  <span>Booking ID</span>
+                  <strong>{selectedDocumentBooking.id}</strong>
+                </div>
+              </div>
+
+              <div className="doc-sheet-body">
+                <div>
+                  <div className="doc-section-title">
+                    <CalendarDays size={13} /> Reservation & Event Details
+                  </div>
+                  <div className="doc-grid-2">
+                    <div className="doc-info-block">
+                      <span>Event Title</span>
+                      <strong>{selectedDocumentBooking.event_name}</strong>
+                    </div>
+                    <div className="doc-info-block">
+                      <span>Event Category</span>
+                      <strong>{selectedDocumentBooking.event_type || "Academic"}</strong>
+                    </div>
+                    <div className="doc-info-block">
+                      <span>Reserved Dates</span>
+                      <strong>{fmtDateRange(selectedDocumentBooking.start_date || selectedDocumentBooking.event_date, selectedDocumentBooking.end_date)}</strong>
+                    </div>
+                    <div className="doc-info-block">
+                      <span>Time Window</span>
+                      <strong>{fmtTime(selectedDocumentBooking.start_time)} – {fmtTime(selectedDocumentBooking.end_time)}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="doc-section-title">
+                    <Building2 size={13} /> Allocated Venue & Requester
+                  </div>
+                  <div className="doc-grid-2">
+                    <div className="doc-info-block">
+                      <span>Campus Venue</span>
+                      <strong>{selectedDocumentBooking.venue_name} ({selectedDocumentBooking.venue_location || "Campus"})</strong>
+                    </div>
+                    <div className="doc-info-block">
+                      <span>Authorized Requester</span>
+                      <strong>{selectedDocumentBooking.requester_name} ({selectedDocumentBooking.requester_role})</strong>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="doc-fingerprint-box">
+                  <ShieldCheck size={18} style={{ flexShrink: 0 }} />
+                  <div>
+                    <strong>Authoritative Database Record:</strong> Verified against campus timetable locks. Approved by {selectedDocumentBooking.reviewer_name || "Campus Administrator"}.
+                  </div>
+                </div>
+
+                <div className="doc-disclaimer-note">
+                  Notice: This summary reflects the verified booking state stored in the campus PostgreSQL database. Private PDF downloads are authorized strictly for the booking owner and campus administrators.
+                </div>
+              </div>
+            </div>
+
+            <div className="modal-actions" style={{ marginTop: "16px" }}>
+              <button type="button" className="button button-secondary" onClick={() => setSelectedDocumentBooking(null)}>
+                Close
+              </button>
+              {selectedDocumentBooking.document?.generation_status === "failed" ? (
+                <button
+                  type="button"
+                  className="button button-primary"
+                  onClick={() => handleRetryDocument(selectedDocumentBooking)}
+                  disabled={docLoadingId === selectedDocumentBooking.id}
+                >
+                  <RefreshCw className={docLoadingId === selectedDocumentBooking.id ? "spin" : ""} size={16} />
+                  Retry Document Generation
+                </button>
+              ) : selectedDocumentBooking.document?.generation_status === "generating" ? (
+                <span className="doc-pill doc-generating">
+                  <LoaderCircle className="spin" size={14} /> Generating PDF Document...
+                </span>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    onClick={() => handleDownloadDocument(selectedDocumentBooking, true)}
+                    disabled={docLoadingId === selectedDocumentBooking.id}
+                  >
+                    <Eye size={16} /> Preview in Browser
+                  </button>
+                  <button
+                    type="button"
+                    className="button button-primary"
+                    onClick={() => handleDownloadDocument(selectedDocumentBooking, false)}
+                    disabled={docLoadingId === selectedDocumentBooking.id}
+                  >
+                    {docLoadingId === selectedDocumentBooking.id ? (
+                      <LoaderCircle className="spin" size={16} />
+                    ) : (
+                      <ArrowDownUp size={16} />
+                    )}
+                    Download PDF
+                  </button>
+                </>
+              )}
+            </div>
+          </Modal>
+        )}
       </>
     );
   }
@@ -2470,7 +2666,19 @@ function VenueGrid({ venues, onBook, onViewDetails, isAdmin, onEditVenue, onTogg
   );
 }
 
-function BookingTable({ bookings, onApprove, onReject, onCancel, currentUserId, isAdmin, compact = false }) {
+function BookingTable({
+  bookings,
+  onApprove,
+  onReject,
+  onCancel,
+  onViewDocument,
+  onDownloadDocument,
+  onRetryDocument,
+  docLoadingId,
+  currentUserId,
+  isAdmin,
+  compact = false
+}) {
   if (!bookings || bookings.length === 0) {
     return (
       <div className="empty-state">
@@ -2533,10 +2741,26 @@ function BookingTable({ bookings, onApprove, onReject, onCancel, currentUserId, 
                     Reason: {b.rejection_reason}
                   </span>
                 )}
-                {b.status === "approved" && b.reviewer_name && (
-                  <span style={{ display: "block", fontSize: "9px", color: "#1e825a", marginTop: "3px" }}>
-                    Approved by {b.reviewer_name}
-                  </span>
+                {b.status === "approved" && (
+                  <>
+                    {b.reviewer_name && (
+                      <span style={{ display: "block", fontSize: "9px", color: "#1e825a", marginTop: "3px" }}>
+                        Approved by {b.reviewer_name}
+                      </span>
+                    )}
+                    {b.document?.document_reference && (
+                      <span className="doc-ref-badge" title="Verified Document Reference">
+                        <FileText size={10} /> {b.document.document_reference}
+                      </span>
+                    )}
+                    {b.document?.generation_status === "failed" && (
+                      isAdmin ? (
+                        <span className="doc-error-badge">PDF Generation Failed</span>
+                      ) : (
+                        <span className="doc-pending-badge">PDF Document Pending</span>
+                      )
+                    )}
+                  </>
                 )}
               </td>
               <td>
@@ -2548,6 +2772,45 @@ function BookingTable({ bookings, onApprove, onReject, onCancel, currentUserId, 
                     <button className="reject-button" onClick={() => onReject(b)} title="Decline Request">
                       <X size={15} />
                     </button>
+                  </div>
+                ) : b.status === "approved" ? (
+                  <div className="doc-action-group">
+                    {onViewDocument && (
+                      <button
+                        className="button button-secondary button-small"
+                        onClick={() => onViewDocument(b)}
+                        title="View verified Booking Approval Summary document"
+                      >
+                        <FileText size={13} /> Summary
+                      </button>
+                    )}
+                    {b.document?.generation_status === "failed" ? (
+                      onRetryDocument && (
+                        <button
+                          className="button button-secondary button-small button-retry"
+                          onClick={() => onRetryDocument(b)}
+                          disabled={docLoadingId === b.id}
+                          title="Retry document generation"
+                        >
+                          <RefreshCw className={docLoadingId === b.id ? "spin" : ""} size={13} /> Retry
+                        </button>
+                      )
+                    ) : b.document?.generation_status === "generating" ? (
+                      <span className="doc-pill doc-generating">
+                        <LoaderCircle className="spin" size={12} /> Generating
+                      </span>
+                    ) : (
+                      onDownloadDocument && (
+                        <button
+                          className="button button-primary button-small"
+                          onClick={() => onDownloadDocument(b, false)}
+                          disabled={docLoadingId === b.id}
+                          title="Download official PDF summary"
+                        >
+                          {docLoadingId === b.id ? <LoaderCircle className="spin" size={13} /> : <ArrowDownUp size={13} />} PDF
+                        </button>
+                      )
+                    )}
                   </div>
                 ) : !isAdmin && b.status === "pending" && currentUserId && b.requester_id === currentUserId && onCancel ? (
                   <button className="button button-danger button-small" onClick={() => onCancel(b)}>

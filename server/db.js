@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { hashPassword } from "./auth.js";
+import { generateApprovalPdf, DOCUMENTS_DIR } from "./documentGenerator.js";
 
 // Ensure data directory exists
 const DATA_DIR = path.resolve(process.cwd(), "data");
@@ -68,6 +69,25 @@ export function initSchema() {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS booking_documents (
+      id TEXT PRIMARY KEY,
+      booking_id TEXT NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+      document_reference TEXT NOT NULL UNIQUE,
+      approval_reference TEXT NOT NULL,
+      document_type TEXT NOT NULL DEFAULT 'approval_summary',
+      file_path TEXT NOT NULL DEFAULT '',
+      file_name TEXT NOT NULL DEFAULT '',
+      file_size INTEGER DEFAULT 0,
+      mime_type TEXT NOT NULL DEFAULT 'application/pdf',
+      generation_status TEXT NOT NULL CHECK(generation_status IN ('pending', 'generating', 'ready', 'failed')),
+      generated_at TEXT,
+      generated_by TEXT REFERENCES users(id),
+      error_message TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(booking_id, document_type)
+    );
+
     CREATE TABLE IF NOT EXISTS audit_logs (
       id TEXT PRIMARY KEY,
       actor_id TEXT NOT NULL REFERENCES users(id),
@@ -94,6 +114,8 @@ export function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_bookings_venue_date ON bookings(venue_id, event_date);
     CREATE INDEX IF NOT EXISTS idx_bookings_requester ON bookings(requester_id);
     CREATE INDEX IF NOT EXISTS idx_bookings_status ON bookings(status);
+    CREATE INDEX IF NOT EXISTS idx_booking_documents_booking ON booking_documents(booking_id);
+    CREATE INDEX IF NOT EXISTS idx_booking_documents_ref ON booking_documents(document_reference);
   `);
 
   try {
@@ -357,34 +379,50 @@ export function updateVenue(id, { name, category, location, capacity, facilities
 export function getBookingById(id) {
   const row = db.prepare(`
     SELECT b.*,
-           v.name as venue_name, v.category as venue_category, v.location as venue_location, v.capacity as venue_capacity,
+           v.name as venue_name, v.category as venue_category, v.location as venue_location, v.capacity as venue_capacity, v.facilities as venue_facilities,
            u.full_name as requester_name, u.role as requester_role, u.prn as requester_prn, u.email as requester_email, u.department as requester_department,
-           rev.full_name as reviewer_name
+           rev.full_name as reviewer_name,
+           doc.id as doc_id, doc.document_reference, doc.approval_reference, doc.generation_status as doc_status, doc.generated_at as doc_generated_at, doc.file_name as doc_file_name, doc.file_size as doc_file_size, doc.error_message as doc_error
     FROM bookings b
     JOIN venues v ON v.id = b.venue_id
     JOIN users u ON u.id = b.requester_id
     LEFT JOIN users rev ON rev.id = b.reviewed_by
+    LEFT JOIN booking_documents doc ON doc.booking_id = b.id AND doc.document_type = 'approval_summary'
     WHERE b.id = ?
   `).get(id);
 
   if (!row) return null;
   return {
     ...row,
+    facilities: row.venue_facilities ? (typeof row.venue_facilities === "string" ? JSON.parse(row.venue_facilities) : row.venue_facilities) : [],
     start_date: row.event_date,
-    end_date: row.end_date || row.event_date
+    end_date: row.end_date || row.event_date,
+    document: row.doc_id ? {
+      id: row.doc_id,
+      booking_id: row.id,
+      document_reference: row.document_reference,
+      approval_reference: row.approval_reference,
+      generation_status: row.doc_status,
+      generated_at: row.doc_generated_at,
+      file_name: row.doc_file_name,
+      file_size: row.doc_file_size,
+      error_message: row.doc_error
+    } : null
   };
 }
 
 export function getBookings({ userId = null, role = null, status = null, venue_id = null, date_from = null, date_to = null, search = null } = {}) {
   let query = `
     SELECT b.*,
-           v.name as venue_name, v.category as venue_category, v.location as venue_location, v.capacity as venue_capacity,
+           v.name as venue_name, v.category as venue_category, v.location as venue_location, v.capacity as venue_capacity, v.facilities as venue_facilities,
            u.full_name as requester_name, u.role as requester_role, u.prn as requester_prn, u.email as requester_email, u.department as requester_department,
-           rev.full_name as reviewer_name
+           rev.full_name as reviewer_name,
+           doc.id as doc_id, doc.document_reference, doc.approval_reference, doc.generation_status as doc_status, doc.generated_at as doc_generated_at, doc.file_name as doc_file_name, doc.file_size as doc_file_size, doc.error_message as doc_error
     FROM bookings b
     JOIN venues v ON v.id = b.venue_id
     JOIN users u ON u.id = b.requester_id
     LEFT JOIN users rev ON rev.id = b.reviewed_by
+    LEFT JOIN booking_documents doc ON doc.booking_id = b.id AND doc.document_type = 'approval_summary'
     WHERE 1=1
   `;
   const params = [];
@@ -426,8 +464,20 @@ export function getBookings({ userId = null, role = null, status = null, venue_i
   const rows = db.prepare(query).all(...params);
   return rows.map((r) => ({
     ...r,
+    facilities: r.venue_facilities ? (typeof r.venue_facilities === "string" ? JSON.parse(r.venue_facilities) : r.venue_facilities) : [],
     start_date: r.event_date,
-    end_date: r.end_date || r.event_date
+    end_date: r.end_date || r.event_date,
+    document: r.doc_id ? {
+      id: r.doc_id,
+      booking_id: r.id,
+      document_reference: r.document_reference,
+      approval_reference: r.approval_reference,
+      generation_status: r.doc_status,
+      generated_at: r.doc_generated_at,
+      file_name: r.doc_file_name,
+      file_size: r.doc_file_size,
+      error_message: r.doc_error
+    } : null
   }));
 }
 
@@ -489,86 +539,362 @@ export function createBooking({ requester_id, venue_id, event_name, event_type, 
   return getBookingById(id);
 }
 
-// ATOMIC APPROVAL WITH CONCURRENCY AND CONFLICT LOCKING
+// ----------------- BOOKING APPROVAL & DOCUMENTS -----------------
+
+export function getBookingDocument(bookingId, documentType = "approval_summary") {
+  return db.prepare(`
+    SELECT * FROM booking_documents
+    WHERE booking_id = ? AND document_type = ?
+  `).get(bookingId, documentType) || null;
+}
+
+export function getBookingDocumentByRef(documentReference) {
+  return db.prepare(`
+    SELECT * FROM booking_documents
+    WHERE document_reference = ?
+  `).get(documentReference) || null;
+}
+
+// ATOMIC APPROVAL WITH CONCURRENCY, CONFLICT LOCKING & AUTOMATIC DOCUMENT GENERATION
 export function approveBooking({ bookingId, adminId, ipAddress = "127.0.0.1" }) {
+  // 1. Check current booking state
+  const existing = db.prepare("SELECT * FROM bookings WHERE id = ?").get(bookingId);
+  if (!existing) {
+    throw new Error("Booking not found");
+  }
+
+  // Idempotency: If booking is ALREADY approved, return existing approval and ensure document exists
+  if (existing.status === "approved") {
+    const hydrated = getBookingById(bookingId);
+    let doc = getBookingDocument(bookingId);
+
+    const promise = (async () => {
+      // If no document exists or generation previously failed, attempt recovery
+      if (!doc || doc.generation_status === "failed") {
+        try {
+          const docRef = doc?.document_reference || `DOC-MIT-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+          const appRef = doc?.approval_reference || `APP-MIT-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+          
+          const now = new Date().toISOString();
+          db.prepare(`
+            INSERT INTO booking_documents (
+              id, booking_id, document_reference, approval_reference, document_type,
+              file_path, file_name, file_size, mime_type, generation_status,
+              generated_at, generated_by, error_message, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, 'approval_summary', '', '', 0, 'application/pdf', 'generating', NULL, ?, NULL, ?, ?)
+            ON CONFLICT(booking_id, document_type) DO UPDATE SET
+              generation_status = 'generating',
+              error_message = NULL,
+              updated_at = excluded.updated_at
+          `).run(doc?.id || "doc-" + crypto.randomUUID(), bookingId, docRef, appRef, adminId, now, now);
+
+          const pdfResult = await generateApprovalPdf(hydrated, {
+            documentReference: docRef,
+            approvalReference: appRef
+          });
+
+          const readyNow = new Date().toISOString();
+          db.prepare(`
+            UPDATE booking_documents
+            SET generation_status = 'ready', file_path = ?, file_name = ?, file_size = ?,
+                generated_at = ?, error_message = NULL, updated_at = ?
+            WHERE booking_id = ? AND document_type = 'approval_summary'
+          `).run(pdfResult.filePath, pdfResult.fileName, pdfResult.fileSize, readyNow, readyNow, bookingId);
+        } catch (genErr) {
+          console.error("PDF recovery error on idempotent check:", genErr.message);
+        }
+      }
+      const finalBooking = getBookingById(bookingId);
+      const finalDoc = getBookingDocument(bookingId);
+      return {
+        ...finalBooking,
+        booking: finalBooking,
+        document: finalDoc,
+        isExisting: true
+      };
+    })();
+
+    Object.assign(promise, hydrated, {
+      booking: hydrated,
+      document: doc,
+      isExisting: true
+    });
+
+    return promise;
+  }
+
+  if (existing.status !== "pending") {
+    throw new Error(`Cannot approve booking that is currently ${existing.status}`);
+  }
+
+  const venue = getVenueById(existing.venue_id);
+  if (!venue || !venue.is_active) {
+    throw new Error("Cannot approve booking: venue is currently inactive");
+  }
+
+  // Pre-check for overlapping APPROVED booking
+  const conflict = db.prepare(`
+    SELECT b.id, b.event_name, b.start_time, b.end_time, u.full_name as requester_name
+    FROM bookings b
+    JOIN users u ON u.id = b.requester_id
+    WHERE b.venue_id = ?
+      AND (b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?)
+      AND b.status = 'approved'
+      AND b.id != ?
+      AND b.start_time < ?
+      AND b.end_time > ?
+  `).get(existing.venue_id, existing.end_date || existing.event_date, existing.event_date, existing.id, existing.end_time, existing.start_time);
+
+  if (conflict) {
+    const err = new Error(`Approval blocked by booking conflict: "${conflict.event_name}" (${conflict.start_time} - ${conflict.end_time}) by ${conflict.requester_name} is already confirmed for this venue slot`);
+    err.code = "CONFLICT";
+    throw err;
+  }
+
+  // Begin atomic approval transaction
   db.exec("BEGIN IMMEDIATE");
+  const now = new Date().toISOString();
+  const docRef = `DOC-MIT-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+  const appRef = `APP-MIT-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+  const docId = "doc-" + crypto.randomUUID();
+
   try {
-    const booking = db.prepare("SELECT * FROM bookings WHERE id = ?").get(bookingId);
-    if (!booking) {
-      db.exec("ROLLBACK");
-      throw new Error("Booking not found");
-    }
-    if (booking.status !== "pending") {
-      db.exec("ROLLBACK");
-      throw new Error(`Cannot approve booking that is currently ${booking.status}`);
-    }
-
-    const venue = getVenueById(booking.venue_id);
-    if (!venue || !venue.is_active) {
-      db.exec("ROLLBACK");
-      throw new Error("Cannot approve booking: venue is currently inactive");
-    }
-
-    // Check for any overlapping APPROVED booking
-    const conflict = db.prepare(`
-      SELECT b.id, b.event_name, b.start_time, b.end_time, u.full_name as requester_name
-      FROM bookings b
-      JOIN users u ON u.id = b.requester_id
-      WHERE b.venue_id = ?
-        AND (b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?)
-        AND b.status = 'approved'
-        AND b.id != ?
-        AND b.start_time < ?
-        AND b.end_time > ?
-    `).get(booking.venue_id, booking.end_date || booking.event_date, booking.event_date, booking.id, booking.end_time, booking.start_time);
-
-    if (conflict) {
-      db.exec("ROLLBACK");
-      const err = new Error(`Approval blocked by booking conflict: "${conflict.event_name}" (${conflict.start_time} - ${conflict.end_time}) by ${conflict.requester_name} is already confirmed for this venue slot`);
-      err.code = "CONFLICT";
-      throw err;
-    }
-
-    const now = new Date().toISOString();
-
+    // 1. Commit approval status in bookings table
     db.prepare(`
       UPDATE bookings
       SET status = 'approved', reviewed_by = ?, reviewed_at = ?, updated_at = ?
       WHERE id = ?
     `).run(adminId, now, now, bookingId);
 
-    // Audit log
+    // 2. Audit log
     const logId = "log-" + crypto.randomUUID();
     db.prepare(`
       INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, details, ip_address, created_at)
       VALUES (?, ?, 'APPROVE_BOOKING', 'booking', ?, ?, ?, ?)
     `).run(logId, adminId, bookingId, JSON.stringify({
-      venue_id: booking.venue_id,
+      venue_id: existing.venue_id,
       venue_name: venue.name,
-      event_name: booking.event_name,
-      event_date: booking.event_date,
-      start_time: booking.start_time,
-      end_time: booking.end_time
+      event_name: existing.event_name,
+      event_date: existing.event_date,
+      start_time: existing.start_time,
+      end_time: existing.end_time,
+      approval_reference: appRef
     }), ipAddress, now);
 
-    // In-app notification
+    // 3. Insert or update initial document record with 'generating' status
+    db.prepare(`
+      INSERT INTO booking_documents (
+        id, booking_id, document_reference, approval_reference, document_type,
+        file_path, file_name, file_size, mime_type, generation_status,
+        generated_at, generated_by, error_message, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, 'approval_summary', '', '', 0, 'application/pdf', 'generating', NULL, ?, NULL, ?, ?)
+      ON CONFLICT(booking_id, document_type) DO UPDATE SET
+        document_reference = excluded.document_reference,
+        approval_reference = excluded.approval_reference,
+        generation_status = 'generating',
+        generated_by = excluded.generated_by,
+        error_message = NULL,
+        updated_at = excluded.updated_at
+    `).run(docId, bookingId, docRef, appRef, adminId, now, now);
+
+    // 4. In-app notification
     const notifId = "notif-" + crypto.randomUUID();
     db.prepare(`
       INSERT INTO notifications (id, user_id, booking_id, title, message, created_at)
       VALUES (?, ?, ?, 'Booking Approved', ?, ?)
     `).run(
       notifId,
-      booking.requester_id,
+      existing.requester_id,
       bookingId,
-      `Your booking request for "${booking.event_name}" at ${venue.name} on ${booking.event_date} (${booking.start_time} - ${booking.end_time}) has been APPROVED.`,
+      `Your booking request for "${existing.event_name}" at ${venue.name} on ${existing.event_date} (${existing.start_time} - ${existing.end_time}) has been APPROVED. Official approval summary PDF document is being generated.`,
       now
     );
 
+    // Commit database transaction - approval is now authoritative!
     db.exec("COMMIT");
-    return getBookingById(bookingId);
   } catch (err) {
     try { db.exec("ROLLBACK"); } catch {}
     throw err;
+  }
+
+  // 5. Hydrate persisted booking with committed approval status
+  const hydrated = getBookingById(bookingId);
+
+  // 6. Generate PDF asynchronously while allowing immediate synchronous return
+  const promise = (async () => {
+    let docRecord = null;
+    try {
+      const pdfResult = await generateApprovalPdf(hydrated, {
+        documentReference: docRef,
+        approvalReference: appRef
+      });
+
+      const readyNow = new Date().toISOString();
+      db.prepare(`
+        UPDATE booking_documents
+        SET generation_status = 'ready', file_path = ?, file_name = ?, file_size = ?,
+            generated_at = ?, error_message = NULL, updated_at = ?
+        WHERE booking_id = ? AND document_type = 'approval_summary'
+      `).run(pdfResult.filePath, pdfResult.fileName, pdfResult.fileSize, readyNow, readyNow, bookingId);
+
+      // Requester notification for ready document
+      const readyNotifId = "notif-" + crypto.randomUUID();
+      db.prepare(`
+        INSERT INTO notifications (id, user_id, booking_id, title, message, created_at)
+        VALUES (?, ?, ?, 'Approval Summary Ready', ?, ?)
+      `).run(
+        readyNotifId,
+        existing.requester_id,
+        bookingId,
+        `Your official Booking Approval Summary document (PDF) for "${existing.event_name}" is ready to download.`,
+        readyNow
+      );
+
+      // Audit log for document generation
+      const docLogId = "log-" + crypto.randomUUID();
+      db.prepare(`
+        INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, details, ip_address, created_at)
+        VALUES (?, ?, 'GENERATE_APPROVAL_DOCUMENT', 'booking_document', ?, ?, ?, ?)
+      `).run(docLogId, adminId, docId, JSON.stringify({
+        booking_id: bookingId,
+        document_reference: docRef,
+        approval_reference: appRef,
+        file_name: pdfResult.fileName,
+        file_size: pdfResult.fileSize,
+        status: "ready"
+      }), ipAddress, readyNow);
+
+      docRecord = getBookingDocument(bookingId);
+    } catch (pdfErr) {
+      console.error("PDF generation failed:", pdfErr.message);
+      const failNow = new Date().toISOString();
+      // Do NOT rollback booking approval! Mark document generation as failed.
+      db.prepare(`
+        UPDATE booking_documents
+        SET generation_status = 'failed', error_message = ?, updated_at = ?
+        WHERE booking_id = ? AND document_type = 'approval_summary'
+      `).run(pdfErr.message, failNow, bookingId);
+
+      // Audit log for document generation failure
+      const failLogId = "log-" + crypto.randomUUID();
+      db.prepare(`
+        INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, details, ip_address, created_at)
+        VALUES (?, ?, 'DOCUMENT_GENERATION_FAILED', 'booking_document', ?, ?, ?, ?)
+      `).run(failLogId, adminId, docId, JSON.stringify({
+        booking_id: bookingId,
+        document_reference: docRef,
+        error: pdfErr.message
+      }), ipAddress, failNow);
+
+      docRecord = getBookingDocument(bookingId);
+    }
+
+    const finalBooking = getBookingById(bookingId);
+    return {
+      ...finalBooking,
+      booking: finalBooking,
+      document: docRecord,
+      isExisting: false
+    };
+  })();
+
+  // Synchronously attach committed booking fields onto the returned promise
+  Object.assign(promise, hydrated, {
+    booking: hydrated,
+    document: getBookingDocument(bookingId),
+    isExisting: false
+  });
+
+  return promise;
+}
+
+// RETRY DOCUMENT GENERATION FOR AN APPROVED BOOKING
+export async function retryGenerateBookingDocument({ bookingId, adminId, ipAddress = "127.0.0.1" }) {
+  const booking = getBookingById(bookingId);
+  if (!booking) throw new Error("Booking not found");
+  if (booking.status !== "approved") {
+    throw new Error(`Cannot generate approval document for a booking that is ${booking.status}`);
+  }
+
+  let doc = getBookingDocument(bookingId);
+  const docRef = doc?.document_reference || `DOC-MIT-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+  const appRef = doc?.approval_reference || `APP-MIT-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+  const now = new Date().toISOString();
+
+  // If already ready and file exists on disk, return existing
+  if (doc && doc.generation_status === "ready" && doc.file_path && fs.existsSync(doc.file_path)) {
+    return {
+      booking,
+      document: doc,
+      message: "Approval document is already generated and ready"
+    };
+  }
+
+  // Set status to generating
+  db.prepare(`
+    INSERT INTO booking_documents (
+      id, booking_id, document_reference, approval_reference, document_type,
+      file_path, file_name, file_size, mime_type, generation_status,
+      generated_at, generated_by, error_message, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, 'approval_summary', '', '', 0, 'application/pdf', 'generating', NULL, ?, NULL, ?, ?)
+    ON CONFLICT(booking_id, document_type) DO UPDATE SET
+      generation_status = 'generating',
+      error_message = NULL,
+      updated_at = excluded.updated_at
+  `).run(doc?.id || "doc-" + crypto.randomUUID(), bookingId, docRef, appRef, adminId, now, now);
+
+  try {
+    const pdfResult = await generateApprovalPdf(booking, {
+      documentReference: docRef,
+      approvalReference: appRef
+    });
+
+    const readyNow = new Date().toISOString();
+    db.prepare(`
+      UPDATE booking_documents
+      SET generation_status = 'ready', file_path = ?, file_name = ?, file_size = ?,
+          generated_at = ?, error_message = NULL, updated_at = ?
+      WHERE booking_id = ? AND document_type = 'approval_summary'
+    `).run(pdfResult.filePath, pdfResult.fileName, pdfResult.fileSize, readyNow, readyNow, bookingId);
+
+    // Audit log
+    const logId = "log-" + crypto.randomUUID();
+    db.prepare(`
+      INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, details, ip_address, created_at)
+      VALUES (?, ?, 'RETRY_GENERATE_DOCUMENT_SUCCESS', 'booking_document', ?, ?, ?, ?)
+    `).run(logId, adminId, docRef, JSON.stringify({
+      booking_id: bookingId,
+      file_name: pdfResult.fileName,
+      file_size: pdfResult.fileSize
+    }), ipAddress, readyNow);
+
+    return {
+      booking: getBookingById(bookingId),
+      document: getBookingDocument(bookingId),
+      message: "Approval document generated successfully"
+    };
+  } catch (err) {
+    const failNow = new Date().toISOString();
+    db.prepare(`
+      UPDATE booking_documents
+      SET generation_status = 'failed', error_message = ?, updated_at = ?
+      WHERE booking_id = ? AND document_type = 'approval_summary'
+    `).run(err.message, failNow, bookingId);
+
+    // Audit log
+    const logId = "log-" + crypto.randomUUID();
+    db.prepare(`
+      INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, details, ip_address, created_at)
+      VALUES (?, ?, 'RETRY_GENERATE_DOCUMENT_FAILED', 'booking_document', ?, ?, ?, ?)
+    `).run(logId, adminId, docRef, JSON.stringify({
+      booking_id: bookingId,
+      error: err.message
+    }), ipAddress, failNow);
+
+    throw new Error(`Failed to generate document: ${err.message}`);
   }
 }
 

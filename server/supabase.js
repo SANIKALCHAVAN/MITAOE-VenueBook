@@ -1,5 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
+import crypto from "node:crypto";
 import dotenv from "dotenv";
+import { generateApprovalPdf } from "./documentGenerator.js";
 
 // Load environment variables with override so local .env takes precedence
 dotenv.config({ override: true });
@@ -381,6 +383,26 @@ export async function getBookingsSupabase({ userId, role, status, venue_id, date
   const { data, error } = await query;
   if (error) throw new Error(`Could not retrieve bookings: ${error.message}`);
 
+  // Fetch associated documents if booking_documents table exists
+  let docMap = {};
+  try {
+    const bookingIds = (data || []).map((b) => b.id);
+    if (bookingIds.length > 0) {
+      const { data: docs } = await supabaseAdmin
+        .from("booking_documents")
+        .select("*")
+        .in("booking_id", bookingIds)
+        .eq("document_type", "approval_summary");
+      if (docs) {
+        for (const doc of docs) {
+          docMap[doc.booking_id] = doc;
+        }
+      }
+    }
+  } catch {
+    // If table doesn't exist yet, continue gracefully
+  }
+
   return (data || []).map((b) => {
     let cleanPurpose = b.purpose || "";
     let extractedEndDate = b.end_date || b.event_date;
@@ -418,7 +440,18 @@ export async function getBookingsSupabase({ userId, role, status, venue_id, date
       rejection_reason: b.rejection_reason,
       reviewer_name: b.reviewer?.full_name || "",
       reviewed_at: b.reviewed_at,
-      created_at: b.created_at
+      created_at: b.created_at,
+      document: docMap[b.id] ? {
+        id: docMap[b.id].id,
+        booking_id: b.id,
+        document_reference: docMap[b.id].document_reference,
+        approval_reference: docMap[b.id].approval_reference,
+        generation_status: docMap[b.id].generation_status,
+        generated_at: docMap[b.id].generated_at,
+        file_name: docMap[b.id].file_name,
+        file_size: docMap[b.id].file_size,
+        error_message: docMap[b.id].error_message
+      } : null
     };
   });
 }
@@ -505,9 +538,21 @@ export async function createBookingSupabase({ requester_id, venue_id, event_name
 }
 
 /**
- * Bookings: Atomic approval RPC via PostgreSQL function.
+ * Bookings: Atomic approval RPC via PostgreSQL function + Automatic Document Generation.
  */
 export async function approveBookingSupabase({ bookingId, adminId }) {
+  // 1. Idempotency check: if booking is already approved, retrieve existing document and return
+  const { data: existingBooking } = await supabaseAdmin
+    .from("bookings")
+    .select("id, status")
+    .eq("id", bookingId)
+    .maybeSingle();
+
+  if (existingBooking && existingBooking.status === "approved") {
+    const doc = await getBookingDocumentSupabase(bookingId);
+    return { booking: existingBooking, document: doc, isExisting: true };
+  }
+
   const { data, error } = await supabaseAdmin.rpc("approve_booking_atomic", {
     p_booking_id: bookingId,
     p_admin_id: adminId
@@ -522,7 +567,134 @@ export async function approveBookingSupabase({ bookingId, adminId }) {
     throw err;
   }
 
-  return data;
+  // Fetch hydrated booking record
+  const bookings = await getBookingsSupabase({ userId: adminId, role: "admin", search: bookingId });
+  const hydratedBooking = bookings.find((b) => b.id === bookingId) || null;
+
+  let docRecord = null;
+  const docRef = `DOC-MIT-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+  const appRef = `APP-MIT-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+
+  if (hydratedBooking) {
+    try {
+      const pdfResult = await generateApprovalPdf(hydratedBooking, {
+        documentReference: docRef,
+        approvalReference: appRef
+      });
+
+      const { data: savedDoc } = await supabaseAdmin
+        .from("booking_documents")
+        .upsert({
+          booking_id: bookingId,
+          document_reference: docRef,
+          approval_reference: appRef,
+          document_type: "approval_summary",
+          file_path: pdfResult.filePath,
+          file_name: pdfResult.fileName,
+          file_size: pdfResult.fileSize,
+          mime_type: "application/pdf",
+          generation_status: "ready",
+          generated_at: new Date().toISOString(),
+          generated_by: adminId,
+          error_message: null
+        }, { onConflict: "booking_id, document_type" })
+        .select()
+        .single();
+
+      docRecord = savedDoc;
+    } catch (pdfErr) {
+      console.error("PDF generation failed in Supabase flow:", pdfErr.message);
+      const { data: savedDoc } = await supabaseAdmin
+        .from("booking_documents")
+        .upsert({
+          booking_id: bookingId,
+          document_reference: docRef,
+          approval_reference: appRef,
+          document_type: "approval_summary",
+          file_path: "",
+          file_name: "",
+          file_size: 0,
+          mime_type: "application/pdf",
+          generation_status: "failed",
+          generated_by: adminId,
+          error_message: pdfErr.message
+        }, { onConflict: "booking_id, document_type" })
+        .select()
+        .maybeSingle();
+
+      docRecord = savedDoc;
+    }
+  }
+
+  return { booking: hydratedBooking, document: docRecord, isExisting: false };
+}
+
+export async function getBookingDocumentSupabase(bookingId) {
+  try {
+    const { data } = await supabaseAdmin
+      .from("booking_documents")
+      .select("*")
+      .eq("booking_id", bookingId)
+      .eq("document_type", "approval_summary")
+      .maybeSingle();
+    return data || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function retryGenerateBookingDocumentSupabase({ bookingId, adminId }) {
+  const bookings = await getBookingsSupabase({ userId: adminId, role: "admin", search: bookingId });
+  const hydratedBooking = bookings.find((b) => b.id === bookingId);
+  if (!hydratedBooking) throw new Error("Booking not found");
+  if (hydratedBooking.status !== "approved") {
+    throw new Error(`Cannot generate approval document for a booking that is ${hydratedBooking.status}`);
+  }
+
+  const existingDoc = await getBookingDocumentSupabase(bookingId);
+  const docRef = existingDoc?.document_reference || `DOC-MIT-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+  const appRef = existingDoc?.approval_reference || `APP-MIT-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+
+  try {
+    const pdfResult = await generateApprovalPdf(hydratedBooking, {
+      documentReference: docRef,
+      approvalReference: appRef
+    });
+
+    const { data: savedDoc, error } = await supabaseAdmin
+      .from("booking_documents")
+      .upsert({
+        booking_id: bookingId,
+        document_reference: docRef,
+        approval_reference: appRef,
+        document_type: "approval_summary",
+        file_path: pdfResult.filePath,
+        file_name: pdfResult.fileName,
+        file_size: pdfResult.fileSize,
+        mime_type: "application/pdf",
+        generation_status: "ready",
+        generated_at: new Date().toISOString(),
+        generated_by: adminId,
+        error_message: null
+      }, { onConflict: "booking_id, document_type" })
+      .select()
+      .single();
+
+    if (error) throw error;
+    return { booking: hydratedBooking, document: savedDoc };
+  } catch (err) {
+    await supabaseAdmin
+      .from("booking_documents")
+      .upsert({
+        booking_id: bookingId,
+        document_reference: docRef,
+        approval_reference: appRef,
+        document_type: "approval_summary",
+        generation_status: "failed",
+        error_message: err.message
+      }, { onConflict: "booking_id, document_type" });
+    throw err;
+  }
 }
 
 /**

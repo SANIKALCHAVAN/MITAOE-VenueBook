@@ -154,6 +154,65 @@ export const api = {
     });
   },
 
+  // Booking Documents
+  async getBookingDocument(bookingId) {
+    return request(`/api/bookings/${bookingId}/document`);
+  },
+
+  async retryBookingDocument(bookingId) {
+    return request(`/api/bookings/${bookingId}/document/retry`, {
+      method: "POST"
+    });
+  },
+
+  async downloadBookingDocument(bookingId, { preview = false } = {}) {
+    const token = getStoredToken();
+    const headers = {};
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    const endpoint = `/api/bookings/${bookingId}/document/download${preview ? "?preview=true" : ""}`;
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers
+    });
+
+    if (!response.ok) {
+      let errorMsg = "Failed to download document";
+      try {
+        const errJson = await response.json();
+        errorMsg = errJson.error || errorMsg;
+      } catch {
+        // fallback
+      }
+      throw new Error(errorMsg);
+    }
+
+    const blob = await response.blob();
+    const blobUrl = window.URL.createObjectURL(blob);
+
+    if (preview) {
+      window.open(blobUrl, "_blank");
+    } else {
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = `VenueBook_Approval_${bookingId}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+
+    setTimeout(() => {
+      window.URL.revokeObjectURL(blobUrl);
+    }, 10000);
+  },
+
+  getDocumentDownloadUrl(bookingId, { preview = false } = {}) {
+    const token = getStoredToken();
+    return `/api/bookings/${bookingId}/document/download?token=${encodeURIComponent(token || "")}${preview ? "&preview=true" : ""}`;
+  },
+
   // Admin Dashboard & Operations
   async getAdminStats() {
     return request("/api/admin/stats");

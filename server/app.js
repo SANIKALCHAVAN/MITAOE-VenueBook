@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import express from "express";
 import dotenv from "dotenv";
@@ -19,6 +20,8 @@ import {
   approveBookingSupabase,
   rejectBookingSupabase,
   cancelBookingSupabase,
+  getBookingDocumentSupabase,
+  retryGenerateBookingDocumentSupabase,
   getStatsSupabase,
   getAuditLogsSupabase,
   getUsersSupabase,
@@ -37,17 +40,21 @@ import {
   getVenues as getVenuesSqlite,
   createVenue as createVenueSqlite,
   updateVenue as updateVenueSqlite,
+  getBookingById as getBookingByIdSqlite,
   getBookings as getBookingsSqlite,
   createBooking as createBookingSqlite,
   approveBooking as approveBookingSqlite,
   rejectBooking as rejectBookingSqlite,
   cancelBooking as cancelBookingSqlite,
+  getBookingDocument as getBookingDocumentSqlite,
+  retryGenerateBookingDocument as retryGenerateBookingDocumentSqlite,
   getStats as getStatsSqlite,
   getAuditLogs as getAuditLogsSqlite,
   getNotifications as getNotificationsSqlite,
   markNotificationsRead as markNotificationsReadSqlite
 } from "./db.js";
 import { verifyJwt, verifyPassword, signJwt } from "./auth.js";
+import { generateApprovalPdf, DOCUMENTS_DIR, sanitizeFilename } from "./documentGenerator.js";
 
 export const app = express();
 
@@ -111,12 +118,17 @@ app.use((req, res, next) => {
 
 // Authentication Middleware
 async function authenticate(req, res, next) {
+  let token = "";
   const authHeader = req.headers.authorization || "";
-  if (!authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Authentication required" });
+  if (authHeader.startsWith("Bearer ")) {
+    token = authHeader.substring(7).trim();
+  } else if (req.query.token) {
+    token = String(req.query.token).trim();
   }
 
-  const token = authHeader.substring(7).trim();
+  if (!token) {
+    return res.status(401).json({ error: "Authentication required" });
+  }
 
   // 1. Verify with Supabase Auth when Supabase is enabled
   try {
@@ -449,23 +461,201 @@ app.put("/api/bookings/:id/status", authenticate, requireRole("admin"), async (r
   try {
     if (await useSupabase()) {
       if (status === "approved") {
-        await approveBookingSupabase({ bookingId, adminId: req.user.id });
+        const result = await approveBookingSupabase({ bookingId, adminId: req.user.id });
+        const isReady = result.document?.generation_status === "ready";
+        const isFailed = result.document?.generation_status === "failed";
+        const message = isReady
+          ? "Booking approved successfully. Booking approval summary is ready to view or download."
+          : (isFailed
+             ? "The booking was approved, but the PDF could not be generated. Please retry document generation."
+             : "Booking approved successfully. Your approval summary is being generated.");
+
+        return res.json({
+          success: true,
+          booking: result.booking,
+          document: result.document,
+          message
+        });
       } else {
         await rejectBookingSupabase({ bookingId, adminId: req.user.id, reason });
+        return res.json({ success: true, message: `Booking rejected` });
       }
-      return res.json({ success: true, message: `Booking ${status} in Supabase` });
     }
 
-    let updated;
     if (status === "approved") {
-      updated = approveBookingSqlite({ bookingId, adminId: req.user.id, ipAddress });
+      const result = await approveBookingSqlite({ bookingId, adminId: req.user.id, ipAddress });
+      const isReady = result.document?.generation_status === "ready";
+      const isFailed = result.document?.generation_status === "failed";
+      const message = isReady
+        ? "Booking approved successfully. Booking approval summary is ready to view or download."
+        : (isFailed
+           ? "The booking was approved, but the PDF could not be generated. Please retry document generation."
+           : "Booking approved successfully. Your approval summary is being generated.");
+
+      return res.json({
+        success: true,
+        booking: result.booking,
+        document: result.document,
+        message
+      });
     } else {
-      updated = rejectBookingSqlite({ bookingId, adminId: req.user.id, reason, ipAddress });
+      const updated = rejectBookingSqlite({ bookingId, adminId: req.user.id, reason, ipAddress });
+      return res.json({ success: true, booking: updated, message: `Booking rejected` });
     }
-    res.json({ booking: updated, message: `Booking ${status}` });
   } catch (err) {
     const code = err.code === "CONFLICT" || err.status === 409 ? 409 : 400;
     handleApiError(res, err, code);
+  }
+});
+
+// -------------------------------------------------------------
+// BOOKING APPROVAL DOCUMENT ENDPOINTS
+// -------------------------------------------------------------
+
+// 1. Get Document Metadata & Status
+app.get("/api/bookings/:id/document", authenticate, async (req, res) => {
+  const bookingId = req.params.id;
+
+  try {
+    let booking = null;
+    let document = null;
+
+    if (await useSupabase()) {
+      const bookings = await getBookingsSupabase({ userId: req.user.id, role: req.user.role, search: bookingId });
+      booking = bookings.find((b) => b.id === bookingId);
+      if (!booking) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+      if (req.user.role !== "admin" && booking.requester_id !== req.user.id) {
+        return res.status(403).json({ error: "Access forbidden: You can only view documents for your own bookings" });
+      }
+      document = await getBookingDocumentSupabase(bookingId);
+    } else {
+      booking = getBookingByIdSqlite(bookingId);
+      if (!booking) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+      if (req.user.role !== "admin" && booking.requester_id !== req.user.id) {
+        return res.status(403).json({ error: "Access forbidden: You can only view documents for your own bookings" });
+      }
+      document = getBookingDocumentSqlite(bookingId);
+    }
+
+    if (booking.status !== "approved") {
+      return res.status(400).json({ error: `No approval summary document exists for a booking with status '${booking.status}'` });
+    }
+
+    if (!document) {
+      return res.status(404).json({ error: "Approval summary document has not been generated for this booking yet" });
+    }
+
+    res.json({ document });
+  } catch (err) {
+    handleApiError(res, err, 500);
+  }
+});
+
+// 2. Stream Private PDF Document (View / Download)
+app.get("/api/bookings/:id/document/download", authenticate, async (req, res) => {
+  const bookingId = req.params.id;
+
+  try {
+    let booking = null;
+    let document = null;
+
+    if (await useSupabase()) {
+      const bookings = await getBookingsSupabase({ userId: req.user.id, role: req.user.role, search: bookingId });
+      booking = bookings.find((b) => b.id === bookingId);
+      if (!booking) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+      if (req.user.role !== "admin" && booking.requester_id !== req.user.id) {
+        return res.status(403).json({ error: "Access forbidden: You can only download documents for your own bookings" });
+      }
+      document = await getBookingDocumentSupabase(bookingId);
+    } else {
+      booking = getBookingByIdSqlite(bookingId);
+      if (!booking) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+      if (req.user.role !== "admin" && booking.requester_id !== req.user.id) {
+        return res.status(403).json({ error: "Access forbidden: You can only download documents for your own bookings" });
+      }
+      document = getBookingDocumentSqlite(bookingId);
+    }
+
+    if (booking.status !== "approved") {
+      return res.status(400).json({ error: `Cannot download approval document for a booking that is ${booking.status}` });
+    }
+
+    const safeId = sanitizeFilename(booking.id);
+    const expectedFileName = `VenueBook_Approval_${safeId}.pdf`;
+    let targetFilePath = document?.file_path && fs.existsSync(document.file_path)
+      ? document.file_path
+      : path.join(DOCUMENTS_DIR, expectedFileName);
+
+    // If file doesn't exist on disk, generate it from authoritative database record
+    if (!fs.existsSync(targetFilePath)) {
+      const pdfResult = await generateApprovalPdf(booking, {
+        documentReference: document?.document_reference,
+        approvalReference: document?.approval_reference
+      });
+      targetFilePath = pdfResult.filePath;
+    }
+
+    const isPreview = req.query.preview === "true" || req.query.inline === "true";
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `${isPreview ? "inline" : "attachment"}; filename="${expectedFileName}"`);
+    fs.createReadStream(targetFilePath).pipe(res);
+  } catch (err) {
+    handleApiError(res, err, 500);
+  }
+});
+
+// 3. Secure Retry Document Generation
+app.post("/api/bookings/:id/document/retry", authenticate, async (req, res) => {
+  const bookingId = req.params.id;
+  const ipAddress = req.ip || "127.0.0.1";
+
+  try {
+    let booking = null;
+    if (await useSupabase()) {
+      const bookings = await getBookingsSupabase({ userId: req.user.id, role: req.user.role, search: bookingId });
+      booking = bookings.find((b) => b.id === bookingId);
+      if (!booking) return res.status(404).json({ error: "Booking not found" });
+      if (req.user.role !== "admin" && booking.requester_id !== req.user.id) {
+        return res.status(403).json({ error: "Access forbidden: You are not authorized to retry this document" });
+      }
+      if (booking.status !== "approved") {
+        return res.status(400).json({ error: "Cannot generate document for non-approved booking" });
+      }
+      const result = await retryGenerateBookingDocumentSupabase({ bookingId, adminId: req.user.id });
+      return res.json({
+        success: true,
+        booking: result.booking,
+        document: result.document,
+        message: "Booking approval summary regenerated successfully."
+      });
+    }
+
+    booking = getBookingByIdSqlite(bookingId);
+    if (!booking) return res.status(404).json({ error: "Booking not found" });
+    if (req.user.role !== "admin" && booking.requester_id !== req.user.id) {
+      return res.status(403).json({ error: "Access forbidden: You are not authorized to retry this document" });
+    }
+    if (booking.status !== "approved") {
+      return res.status(400).json({ error: "Cannot generate document for non-approved booking" });
+    }
+
+    const result = await retryGenerateBookingDocumentSqlite({ bookingId, adminId: req.user.id, ipAddress });
+    return res.json({
+      success: true,
+      booking: result.booking,
+      document: result.document,
+      message: "Booking approval summary regenerated successfully."
+    });
+  } catch (err) {
+    handleApiError(res, err, 500);
   }
 });
 
