@@ -1,3 +1,4 @@
+import path from "node:path";
 import express from "express";
 import dotenv from "dotenv";
 dotenv.config({ override: true });
@@ -97,6 +98,7 @@ export function handleApiError(res, err, defaultStatus = 500) {
 
 // Middleware
 app.use(express.json());
+app.use("/imgs", express.static(path.resolve(process.cwd(), "imgs")));
 
 // CORS headers
 app.use((req, res, next) => {

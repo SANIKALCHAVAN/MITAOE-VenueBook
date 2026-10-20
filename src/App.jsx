@@ -8,6 +8,7 @@ import {
   Eye, EyeOff, HelpCircle, Info, Sparkles, GraduationCap, School, Lock, ExternalLink
 } from "lucide-react";
 import { api, getStoredToken } from "./api.js";
+import { getVenueImage } from "./venueImages.js";
 
 function futureDate(days) {
   const d = new Date();
@@ -1399,32 +1400,46 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {venues.map((v) => (
-                          <tr key={v.id}>
-                            <td><strong>{v.name}</strong></td>
-                            <td>{v.category} · {v.location}</td>
-                            <td>{v.capacity} persons</td>
-                            <td>{(v.facilities || []).join(", ") || "Standard"}</td>
-                            <td>
-                              <span className={`status status-${v.is_active ? "approved" : "rejected"}`}>
-                                <i />{v.is_active ? "Active" : "Inactive"}
-                              </span>
-                            </td>
-                            <td>
-                              <div className="action-pair">
-                                <button className="button button-secondary button-small" onClick={() => openEditVenue(v)}>
-                                  Edit
-                                </button>
-                                <button
-                                  className={`button button-small ${v.is_active ? "button-danger" : "button-primary"}`}
-                                  onClick={() => toggleVenueActive(v)}
-                                >
-                                  {v.is_active ? "Deactivate" : "Activate"}
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
+                        {venues.map((v) => {
+                          const vImg = getVenueImage(v);
+                          return (
+                            <tr key={v.id}>
+                              <td>
+                                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                                  {vImg && (
+                                    <img
+                                      src={vImg}
+                                      alt=""
+                                      style={{ width: "36px", height: "36px", borderRadius: "6px", objectFit: "cover", flexShrink: 0, border: "1px solid #eaebf2" }}
+                                    />
+                                  )}
+                                  <strong>{v.name}</strong>
+                                </div>
+                              </td>
+                              <td>{v.category} · {v.location}</td>
+                              <td>{v.capacity} persons</td>
+                              <td>{(v.facilities || []).join(", ") || "Standard"}</td>
+                              <td>
+                                <span className={`status status-${v.is_active ? "approved" : "rejected"}`}>
+                                  <i />{v.is_active ? "Active" : "Inactive"}
+                                </span>
+                              </td>
+                              <td>
+                                <div className="action-pair">
+                                  <button className="button button-secondary button-small" onClick={() => openEditVenue(v)}>
+                                    Edit
+                                  </button>
+                                  <button
+                                    className={`button button-small ${v.is_active ? "button-danger" : "button-primary"}`}
+                                    onClick={() => toggleVenueActive(v)}
+                                  >
+                                    {v.is_active ? "Deactivate" : "Activate"}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -1707,22 +1722,39 @@ export default function App() {
             onClose={() => setSelectedDetailVenue(null)}
           >
             <div className="venue-detail-modal-content">
-              <div className={`detail-banner ${selectedDetailVenue.color || "lavender"}`}>
-                <div>
-                  <span className="role-badge role-student">{selectedDetailVenue.category}</span>
-                  <h3 style={{ marginTop: "6px" }}>{selectedDetailVenue.name}</h3>
-                  <span style={{ fontSize: "11px", display: "flex", alignItems: "center", gap: "4px" }}>
-                    <MapPin size={13} /> {selectedDetailVenue.location}
-                  </span>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <div className="capacity-pill" style={{ background: "white" }}>
-                    <Users size={13} /> Max {selectedDetailVenue.capacity} seats
-                  </div>
-                  <div style={{ marginTop: "6px" }}>
-                    <span className={`status status-${selectedDetailVenue.is_active ? "approved" : "rejected"}`}>
-                      <i />{selectedDetailVenue.is_active ? "Active & Bookable" : "Temporarily Inactive"}
+              <div className="detail-hero-media">
+                {getVenueImage(selectedDetailVenue) ? (
+                  <img
+                    src={getVenueImage(selectedDetailVenue)}
+                    alt={`${selectedDetailVenue.name} - MITAOE Campus Venue`}
+                    className="detail-hero-img"
+                    onError={(e) => {
+                      e.currentTarget.style.display = "none";
+                    }}
+                  />
+                ) : null}
+                <div className="detail-hero-scrim" />
+                <div className="detail-hero-content">
+                  <div>
+                    <span className="role-badge role-student" style={{ background: "rgba(255, 255, 255, 0.95)", color: "var(--purple-dark)", fontWeight: 800 }}>
+                      {selectedDetailVenue.category}
                     </span>
+                    <h3 style={{ marginTop: "6px", color: "#ffffff", textShadow: "0 2px 10px rgba(0, 0, 0, 0.6)", fontSize: "22px", margin: "6px 0 4px" }}>
+                      {selectedDetailVenue.name}
+                    </h3>
+                    <span style={{ fontSize: "12px", display: "flex", alignItems: "center", gap: "4px", color: "#f3f4fd", textShadow: "0 1px 4px rgba(0, 0, 0, 0.5)" }}>
+                      <MapPin size={13} /> {selectedDetailVenue.location}
+                    </span>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div className="capacity-pill" style={{ background: "rgba(255, 255, 255, 0.95)", color: "#1c2035", fontWeight: 800, boxShadow: "0 2px 8px rgba(0,0,0,0.18)" }}>
+                      <Users size={13} /> Max {selectedDetailVenue.capacity} seats
+                    </div>
+                    <div style={{ marginTop: "6px" }}>
+                      <span className={`status status-${selectedDetailVenue.is_active ? "approved" : "rejected"}`} style={{ boxShadow: "0 2px 8px rgba(0,0,0,0.18)" }}>
+                        <i />{selectedDetailVenue.is_active ? "Active & Bookable" : "Temporarily Inactive"}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -2362,15 +2394,36 @@ function VenueGrid({ venues, onBook, onViewDetails, isAdmin, onEditVenue, onTogg
           ? Monitor
           : Building2;
 
+        const venueImg = getVenueImage(v);
+
         return (
           <article className="venue-card" key={v.id}>
-            <div className={`venue-illustration ${v.color || ["lavender", "blue", "mint", "peach"][i % 4]}`}>
+            <div className="venue-image-wrap">
+              {venueImg ? (
+                <img
+                  src={venueImg}
+                  alt={`${v.name} - MITAOE Campus Venue`}
+                  className="venue-photo"
+                  loading="lazy"
+                  onError={(e) => {
+                    e.currentTarget.style.display = "none";
+                    const fb = e.currentTarget.parentElement?.querySelector(".fallback-illustration");
+                    if (fb) fb.style.display = "flex";
+                  }}
+                />
+              ) : null}
+              <div
+                className={`venue-illustration fallback-illustration ${v.color || ["lavender", "blue", "mint", "peach"][i % 4]}`}
+                style={{ display: venueImg ? "none" : "flex", width: "100%", height: "100%", position: "absolute", inset: 0 }}
+              >
+                <div className="venue-art-icon"><Icon size={45} strokeWidth={1.3} /></div>
+                <div className="art-lines"><i /><i /><i /><i /></div>
+              </div>
+              <div className="venue-image-scrim" />
               <div className="illustration-top">
                 <span className="venue-type">{v.category}</span>
                 <span className="capacity-pill"><Users size={13} /> {v.capacity} max</span>
               </div>
-              <div className="venue-art-icon"><Icon size={45} strokeWidth={1.3} /></div>
-              <div className="art-lines"><i /><i /><i /><i /></div>
             </div>
             <div className="venue-details">
               <h3>{v.name}</h3>
