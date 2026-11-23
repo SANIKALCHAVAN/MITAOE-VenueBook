@@ -4,6 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { hashPassword } from "./auth.js";
 import { generateApprovalPdf, DOCUMENTS_DIR } from "./documentGenerator.js";
+import { STUDENTS_LIST, CLASS_COORDINATOR } from "./studentsData.js";
 
 // Ensure data directory exists
 const DATA_DIR = path.resolve(process.cwd(), "data");
@@ -17,6 +18,7 @@ export const db = new DatabaseSync(DB_PATH);
 // Configure WAL mode and foreign keys for durability and performance
 db.exec("PRAGMA journal_mode = WAL;");
 db.exec("PRAGMA foreign_keys = ON;");
+db.exec("PRAGMA busy_timeout = 10000;");
 
 // Initialize Schema
 export function initSchema() {
@@ -118,10 +120,24 @@ export function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_booking_documents_ref ON booking_documents(document_reference);
   `);
 
-  try {
-    db.exec("ALTER TABLE bookings ADD COLUMN end_date TEXT;");
-  } catch (e) {
-    // Column already exists
+  const alterStatements = [
+    "ALTER TABLE bookings ADD COLUMN end_date TEXT;",
+    "ALTER TABLE bookings ADD COLUMN time_slot TEXT;",
+    "ALTER TABLE bookings ADD COLUMN admin_remark TEXT;",
+    "ALTER TABLE venues ADD COLUMN images TEXT;",
+    "ALTER TABLE users ADD COLUMN sr_no INTEGER;",
+    "ALTER TABLE users ADD COLUMN batch TEXT;",
+    "ALTER TABLE users ADD COLUMN mobile TEXT;",
+    "ALTER TABLE users ADD COLUMN division TEXT;",
+    "ALTER TABLE users ADD COLUMN coordinator TEXT;",
+    "ALTER TABLE users ADD COLUMN avatar_url TEXT;"
+  ];
+  for (const stmt of alterStatements) {
+    try {
+      db.exec(stmt);
+    } catch (e) {
+      // Column already exists
+    }
   }
 
   seedData();
@@ -129,112 +145,302 @@ export function initSchema() {
 
 // Seed initial system users, venues, and starter data
 function seedData() {
-  const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get().count;
   const now = new Date().toISOString();
 
-  if (userCount === 0) {
-    // 1. Administrator Account (Securely provisioned for campus admin)
-    const adminPasswordHash = hashPassword("Admin@MITAOE2026");
+  // 1. Ensure Administrator & Class Coordinator Accounts
+  const adminPasswordHash = hashPassword("Admin@MITAOE2026");
+
+  // Main admin
+  const existingAdmin = db.prepare("SELECT id FROM users WHERE email = 'admin@mitaoe.ac.in'").get();
+  if (!existingAdmin) {
     db.prepare(`
-      INSERT INTO users (id, prn, email, password_hash, full_name, role, department, account_status, email_verified, created_at, updated_at)
-      VALUES (?, NULL, ?, ?, ?, 'admin', 'Campus Administration', 'active', 1, ?, ?)
+      INSERT INTO users (id, prn, email, password_hash, full_name, role, department, division, coordinator, account_status, email_verified, created_at, updated_at)
+      VALUES (?, NULL, ?, ?, ?, 'admin', 'Campus Administration', 'Div-A', 'Dr. Deepak Mishra', 'active', 1, ?, ?)
     `).run("usr-admin-01", "admin@mitaoe.ac.in", adminPasswordHash, "MITAOE Venue Administrator", now, now);
-
-    // 2. Pre-provisioned Teacher accounts (Verified official faculty emails)
-    const teacherPasswordHash = hashPassword("Teacher@MITAOE2026");
-    db.prepare(`
-      INSERT INTO users (id, prn, email, password_hash, full_name, role, department, account_status, email_verified, created_at, updated_at)
-      VALUES (?, NULL, ?, ?, ?, 'teacher', ?, 'active', 1, ?, ?)
-    `).run("usr-teach-01", "prof.sharma@mitaoe.ac.in", teacherPasswordHash, "Prof. Rajesh Sharma", "Computer Engineering", now, now);
-
-    db.prepare(`
-      INSERT INTO users (id, prn, email, password_hash, full_name, role, department, account_status, email_verified, created_at, updated_at)
-      VALUES (?, NULL, ?, ?, ?, 'teacher', ?, 'active', 1, ?, ?)
-    `).run("usr-teach-02", "prof.patil@mitaoe.ac.in", teacherPasswordHash, "Dr. Sunita Patil", "Electronics Engineering", now, now);
-
-    // 3. Pre-provisioned Student accounts (Official PRN-based roster)
-    const studentPasswordHash = hashPassword("Student@MITAOE2026");
-    db.prepare(`
-      INSERT INTO users (id, prn, email, password_hash, full_name, role, department, account_status, email_verified, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'student', ?, 'active', 1, ?, ?)
-    `).run("usr-stud-01", "PRN2024001", "aarav.patil@student.mitaoe.ac.in", studentPasswordHash, "Aarav Patil", "Computer Engineering", now, now);
-
-    db.prepare(`
-      INSERT INTO users (id, prn, email, password_hash, full_name, role, department, account_status, email_verified, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'student', ?, 'active', 1, ?, ?)
-    `).run("usr-stud-02", "PRN2024002", "meera.joshi@student.mitaoe.ac.in", studentPasswordHash, "Meera Joshi", "Information Technology", now, now);
-
-    db.prepare(`
-      INSERT INTO users (id, prn, email, password_hash, full_name, role, department, account_status, email_verified, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'student', ?, 'active', 1, ?, ?)
-    `).run("usr-stud-03", "PRN2024003", "rohan.u@student.mitaoe.ac.in", studentPasswordHash, "Rohan Umbarepatil", "Mechanical Engineering", now, now);
   }
 
-  const venueCount = db.prepare("SELECT COUNT(*) as count FROM venues").get().count;
-  if (venueCount === 0) {
-    const venues = [
-      { id: "v1", name: "Main Auditorium", category: "Auditorium", capacity: 500, location: "Main Building", facilities: ["Projector", "Sound system", "Stage", "AC"], color: "lavender", description: "Central auditorium equipped for major symposiums, annual festivals, and convocations." },
-      { id: "v2", name: "Seminar Hall A", category: "Seminar Hall", capacity: 120, location: "Academic Block", facilities: ["Projector", "Wi-Fi", "Microphone", "Podium"], color: "blue", description: "Tiered seating hall ideal for departmental lectures, guest seminars, and workshops." },
-      { id: "v3", name: "Seminar Hall B", category: "Seminar Hall", capacity: 80, location: "Academic Block", facilities: ["Projector", "Wi-Fi", "Audio"], color: "mint", description: "Compact seminar space for student paper presentations and interactive seminars." },
-      { id: "v4", name: "Conference Room", category: "Meeting Room", capacity: 24, location: "Administration Block", facilities: ["Display Screen", "Wi-Fi", "Video Conferencing"], color: "peach", description: "Executive conference suite with hybrid video conferencing and presentation display." },
-      { id: "v5", name: "Innovation Room", category: "Event Room", capacity: 60, location: "Innovation Centre", facilities: ["Interactive Display", "Whiteboard", "Wi-Fi"], color: "pink", description: "Creative workspace designed for design thinking, hackathons, and ideation sessions." },
-      { id: "v6", name: "Open Activity Space", category: "Common Space", capacity: 100, location: "Student Activity Area", facilities: ["Flexible seating", "Power outlets", "Acoustics"], color: "yellow", description: "Vibrant indoor commons for cultural rehearsals, club exhibits, and collaborative activities." }
-    ];
+  // Class Coordinator: Dr. Deepak Mishra (Div-A)
+  const existingCoordinator = db.prepare("SELECT id FROM users WHERE email = ?").get(CLASS_COORDINATOR.email);
+  if (!existingCoordinator) {
+    db.prepare(`
+      INSERT INTO users (id, prn, email, password_hash, full_name, role, department, division, coordinator, account_status, email_verified, created_at, updated_at)
+      VALUES (?, NULL, ?, ?, ?, 'admin', 'Computer Engineering', 'Div-A', 'Dr. Deepak Mishra', 'active', 1, ?, ?)
+    `).run("usr-coord-deepak", CLASS_COORDINATOR.email, adminPasswordHash, "Dr. Deepak Mishra (Class Coordinator Div-A)", now, now);
+  }
 
-    const insertVenue = db.prepare(`
-      INSERT INTO venues (id, name, category, location, capacity, facilities, description, color, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-    `);
+  // 2. Pre-provisioned Teacher accounts
+  const teacherPasswordHash = hashPassword("Teacher@MITAOE2026");
+  const checkTeacher = db.prepare("SELECT id FROM users WHERE email = ?");
+  if (!checkTeacher.get("prof.sharma@mitaoe.ac.in")) {
+    db.prepare(`
+      INSERT INTO users (id, prn, email, password_hash, full_name, role, department, division, coordinator, account_status, email_verified, created_at, updated_at)
+      VALUES (?, NULL, ?, ?, ?, 'teacher', ?, 'Div-A', 'Dr. Deepak Mishra', 'active', 1, ?, ?)
+    `).run("usr-teach-01", "prof.sharma@mitaoe.ac.in", teacherPasswordHash, "Prof. Rajesh Sharma", "Computer Engineering", now, now);
+  }
+  if (!checkTeacher.get("prof.patil@mitaoe.ac.in")) {
+    db.prepare(`
+      INSERT INTO users (id, prn, email, password_hash, full_name, role, department, division, coordinator, account_status, email_verified, created_at, updated_at)
+      VALUES (?, NULL, ?, ?, ?, 'teacher', ?, 'Div-A', 'Dr. Deepak Mishra', 'active', 1, ?, ?)
+    `).run("usr-teach-02", "prof.patil@mitaoe.ac.in", teacherPasswordHash, "Dr. Sunita Patil", "Electronics Engineering", now, now);
+  }
 
-    for (const v of venues) {
-      insertVenue.run(v.id, v.name, v.category, v.location, v.capacity, JSON.stringify(v.facilities), v.description, v.color, now, now);
+  // 3. Seed / Update ALL 74 Students from the official TY Div-A Roll Call List (only once if not fully seeded)
+  const isFullySeeded = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'student' AND sr_no = 74").get()?.count > 0;
+  if (!isFullySeeded) {
+    db.exec("BEGIN IMMEDIATE;");
+    try {
+      const studentPasswordHash = hashPassword("Student@MITAOE2026");
+      const checkStudentByPrn = db.prepare("SELECT id FROM users WHERE prn = ?");
+      const insertStudent = db.prepare(`
+        INSERT INTO users (id, prn, email, password_hash, full_name, role, department, division, coordinator, account_status, email_verified, sr_no, batch, mobile, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'student', 'Computer Engineering', 'Div-A', 'Dr. Deepak Mishra', 'active', 1, ?, ?, ?, ?, ?)
+      `);
+      const updateStudent = db.prepare(`
+        UPDATE users SET sr_no = ?, batch = ?, mobile = ?, full_name = ?, email = ?, division = 'Div-A', coordinator = 'Dr. Deepak Mishra'
+        WHERE prn = ?
+      `);
+
+      for (const s of STUDENTS_LIST) {
+        const existing = checkStudentByPrn.get(s.prn);
+        if (!existing) {
+          insertStudent.run(`usr-stud-${s.prn}`, s.prn, s.email, studentPasswordHash, s.full_name, s.sr_no, s.batch, s.mobile, now, now);
+        } else {
+          updateStudent.run(s.sr_no, s.batch, s.mobile, s.full_name, s.email, s.prn);
+        }
+      }
+
+      // Also ensure legacy test student accounts exist if not present
+      const legacyTestStudents = [
+        { prn: "PRN2024001", email: "aarav.patil@student.mitaoe.ac.in", name: "Aarav Patil", dept: "Computer Engineering" },
+        { prn: "PRN2024002", email: "meera.joshi@student.mitaoe.ac.in", name: "Meera Joshi", dept: "Information Technology" },
+        { prn: "PRN2024003", email: "rohan.u@student.mitaoe.ac.in", name: "Rohan Umbarepatil", dept: "Mechanical Engineering" }
+      ];
+      for (const lt of legacyTestStudents) {
+        if (!checkStudentByPrn.get(lt.prn)) {
+          insertStudent.run(`usr-stud-${lt.prn}`, lt.prn, lt.email, studentPasswordHash, lt.name, 999, "A1", "9876543210", now, now);
+        }
+      }
+      db.exec("COMMIT;");
+    } catch (e) {
+      try { db.exec("ROLLBACK;"); } catch {}
     }
   }
 
+  // 4. Venues & Rooms Seeding with Multiple Photos
+  const venues = [
+    {
+      id: "v1",
+      name: "Main Auditorium",
+      category: "Auditorium",
+      capacity: 500,
+      location: "Main Central Building, Ground Floor",
+      facilities: ["Projector & 4K Screen", "Dolby Audio System", "Stage Lighting", "Central AC", "Wi-Fi 6", "Podium with Mic"],
+      color: "lavender",
+      images: ["/imgs/Modern Auditorium Conference Hall.png"],
+      description: "Grand multi-tier auditorium for university symposiums, annual festivals, hackathons, and guest keynote seminars."
+    },
+    {
+      id: "v2",
+      name: "Seminar Hall A",
+      category: "Seminar Hall",
+      capacity: 120,
+      location: "Academic Block 1, 2nd Floor",
+      facilities: ["Dual Projectors", "Surround Audio", "Microphone", "Podium", "High-speed Wi-Fi", "Air Conditioned"],
+      color: "blue",
+      images: ["/imgs/Modern Seminar Hall A.png"],
+      description: "Tiered auditorium-style seminar hall ideal for departmental seminars, workshops, and project viva sessions."
+    },
+    {
+      id: "v3",
+      name: "Seminar Hall B",
+      category: "Seminar Hall",
+      capacity: 80,
+      location: "Academic Block 2, 3rd Floor",
+      facilities: ["Interactive Screen", "Wi-Fi", "PA System", "Whiteboard", "Air Conditioned"],
+      color: "mint",
+      images: ["/imgs/Modern Seminar Hall B.png"],
+      description: "Compact modern presentation hall perfect for student paper presentations, club meetups, and technical workshops."
+    },
+    {
+      id: "v4",
+      name: "Corporate Boardroom & Conference Room",
+      category: "Meeting Room",
+      capacity: 24,
+      location: "Administrative Building, 1st Floor",
+      facilities: ["Hybrid Video Conferencing", "Conference Mic Array", "Ultra-HD Screen", "Wi-Fi", "Executive Leather Seating"],
+      color: "peach",
+      images: ["/imgs/Modern Wood-Toned Corporate Boardroom.png"],
+      description: "Premium conference suite equipped for institutional committee meetings, faculty interviews, and guest discussions."
+    },
+    {
+      id: "v5",
+      name: "High-Tech Innovation & IoT Lab",
+      category: "Innovation Lab",
+      capacity: 60,
+      location: "Innovation Centre, 1st Floor",
+      facilities: ["Smart Board", "Movable Workbenches", "Power Tracks", "Gigabit LAN & Wi-Fi", "Development Kits"],
+      color: "pink",
+      images: ["/imgs/Modern High-Tech Innovation Room.png"],
+      description: "High-tech creative lab tailored for design thinking, IoT prototyping, hackathon sprints, and collaborative building."
+    },
+    {
+      id: "v6",
+      name: "Student Activity & Cultural Hall",
+      category: "Common Space",
+      capacity: 100,
+      location: "Student Activity Centre, Ground Floor",
+      facilities: ["Flexible Modular Seating", "Acoustic Wall Panels", "Audio System", "High Power Outlets"],
+      color: "yellow",
+      images: ["/imgs/Spacious Modern Activity Hall.png"],
+      description: "Spacious multi-purpose activity hall for college club rehearsals, competitions, poster exhibitions, and student gatherings."
+    }
+  ];
+
+  const checkVenue = db.prepare("SELECT id FROM venues WHERE id = ?");
+  const insertVenue = db.prepare(`
+    INSERT INTO venues (id, name, category, location, capacity, facilities, description, color, images, is_active, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+  `);
+  const updateVenueQuery = db.prepare(`
+    UPDATE venues SET name = ?, category = ?, location = ?, capacity = ?, facilities = ?, description = ?, color = ?, images = ?
+    WHERE id = ?
+  `);
+
+  for (const v of venues) {
+    const existing = checkVenue.get(v.id);
+    const facilitiesJson = JSON.stringify(v.facilities);
+    const imagesJson = JSON.stringify(v.images);
+    if (!existing) {
+      insertVenue.run(v.id, v.name, v.category, v.location, v.capacity, facilitiesJson, v.description, v.color, imagesJson, now, now);
+    } else {
+      updateVenueQuery.run(v.name, v.category, v.location, v.capacity, facilitiesJson, v.description, v.color, imagesJson, v.id);
+    }
+  }
+
+  // 5. Seed realistic date-sorted bookings if few bookings exist
   const bookingCount = db.prepare("SELECT COUNT(*) as count FROM bookings").get().count;
-  if (bookingCount === 0) {
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 2);
-    const dateStr1 = tomorrow.toISOString().split("T")[0];
+  if (bookingCount < 5) {
+    const today = new Date();
+    const d1 = new Date(today.getTime() + 86400000 * 1).toISOString().split("T")[0];
+    const d2 = new Date(today.getTime() + 86400000 * 2).toISOString().split("T")[0];
+    const d3 = new Date(today.getTime() + 86400000 * 3).toISOString().split("T")[0];
+    const d4 = new Date(today.getTime() + 86400000 * 4).toISOString().split("T")[0];
+    const d5 = new Date(today.getTime() + 86400000 * 5).toISOString().split("T")[0];
 
-    const in3Days = new Date();
-    in3Days.setDate(in3Days.getDate() + 3);
-    const dateStr2 = in3Days.toISOString().split("T")[0];
+    const sampleRequests = [
+      {
+        id: "b-mitaoe-01",
+        requester_prn: "202401070001", // PURI AJIT VASHISHT (A1)
+        venue_id: "v2",
+        event_name: "TY Project Phase-I Progress Review",
+        event_type: "Academic",
+        event_date: d2,
+        time_slot: "Morning (09:00 AM - 12:00 PM)",
+        start_time: "09:00",
+        end_time: "12:00",
+        attendee_count: 40,
+        purpose: "Internal technical milestone presentation before Class Coordinator Dr. Deepak Mishra and panel.",
+        status: "approved",
+        admin_remark: "Approved. Ensure projector and AV system are returned in working order.",
+        reviewed_by: "usr-admin-01"
+      },
+      {
+        id: "b-mitaoe-02",
+        requester_prn: "202401070029", // PATIL RUSHALI SANJAY (A2)
+        venue_id: "v5",
+        event_name: "AI & Smart Campus Hackathon Briefing",
+        event_type: "Club Meeting",
+        event_date: d3,
+        time_slot: "Afternoon (01:00 PM - 04:00 PM)",
+        start_time: "13:00",
+        end_time: "16:00",
+        attendee_count: 50,
+        purpose: "Technical briefing and team registration for inter-college smart campus innovation challenge.",
+        status: "approved",
+        admin_remark: "Approved. All participants must carry college ID cards.",
+        reviewed_by: "usr-admin-01"
+      },
+      {
+        id: "b-mitaoe-03",
+        requester_prn: "202401070058", // KRISH RAJESH TAGRAM (A3)
+        venue_id: "v1",
+        event_name: "MITAOE Annual Coding Championship",
+        event_type: "Competition",
+        event_date: d5,
+        time_slot: "Full Day (09:00 AM - 05:00 PM)",
+        start_time: "09:00",
+        end_time: "17:00",
+        attendee_count: 200,
+        purpose: "Division-wide competitive programming tournament organized for TY Computer Engineering students.",
+        status: "pending",
+        admin_remark: null,
+        reviewed_by: null
+      },
+      {
+        id: "b-mitaoe-04",
+        requester_prn: "202401070006", // PARTH ATUL WANKHADE (A1)
+        venue_id: "v3",
+        event_name: "Robotics Club ROS2 Sensor Fusion Demo",
+        event_type: "Workshop",
+        event_date: d1,
+        time_slot: "Afternoon (01:00 PM - 04:00 PM)",
+        start_time: "13:00",
+        end_time: "16:00",
+        attendee_count: 35,
+        purpose: "Live demonstration of LiDAR mapping and SLAM navigation on mobile robot chassis.",
+        status: "pending",
+        admin_remark: null,
+        reviewed_by: null
+      },
+      {
+        id: "b-mitaoe-05",
+        requester_prn: "202401070035", // MRUNMAYEE SUDHIR PHADTARE (A2)
+        venue_id: "v4",
+        event_name: "Student Council Term Planning Meeting",
+        event_type: "Meeting",
+        event_date: d4,
+        time_slot: "Morning (09:00 AM - 12:00 PM)",
+        start_time: "09:00",
+        end_time: "12:00",
+        attendee_count: 18,
+        purpose: "Discussion of Term-I student events, technical symposiums, and cultural calendar with coordinator.",
+        status: "rejected",
+        admin_remark: "Executive boardroom reserved for external NAAC inspection committee on this date. Please re-apply for Seminar Hall B.",
+        reviewed_by: "usr-admin-01"
+      }
+    ];
 
-    const in5Days = new Date();
-    in5Days.setDate(in5Days.getDate() + 5);
-    const dateStr3 = in5Days.toISOString().split("T")[0];
+    const insertBooking = db.prepare(`
+      INSERT INTO bookings (id, requester_id, venue_id, event_name, event_type, event_date, end_date, time_slot, start_time, end_time, attendee_count, purpose, status, rejection_reason, admin_remark, reviewed_by, reviewed_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
 
-    // Seed realistic requests
-    db.prepare(`
-      INSERT INTO bookings (id, requester_id, venue_id, event_name, event_type, event_date, start_time, end_time, attendee_count, purpose, status, rejection_reason, reviewed_by, reviewed_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      "b1", "usr-stud-01", "v2", "Robotics Club Technical Workshop", "Club Meeting",
-      dateStr1, "14:00", "15:30", 45,
-      "Hands-on workshop demonstrating ROS2 navigation stacks on mobile robots for club members.",
-      "pending", null, null, null, now, now
-    );
-
-    db.prepare(`
-      INSERT INTO bookings (id, requester_id, venue_id, event_name, event_type, event_date, start_time, end_time, attendee_count, purpose, status, rejection_reason, reviewed_by, reviewed_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      "b2", "usr-teach-01", "v4", "Faculty Senate & Curriculum Review", "Academic",
-      dateStr2, "10:00", "11:30", 18,
-      "Quarterly faculty meeting to review curriculum updates and accreditation outcomes.",
-      "approved", null, "usr-admin-01", now, now, now
-    );
-
-    db.prepare(`
-      INSERT INTO bookings (id, requester_id, venue_id, event_name, event_type, event_date, start_time, end_time, attendee_count, purpose, status, rejection_reason, reviewed_by, reviewed_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      "b3", "usr-stud-02", "v5", "Design Thinking Bootcamp", "Workshop",
-      dateStr3, "11:00", "13:00", 50,
-      "Student hackathon preparation and brainstorming session.",
-      "rejected", "Venue scheduled for routine equipment servicing on this date. Please choose Seminar Hall B or an alternate date.", "usr-admin-01", now, now, now
-    );
+    for (const sb of sampleRequests) {
+      const studentUser = db.prepare("SELECT id FROM users WHERE prn = ?").get(sb.requester_prn);
+      if (studentUser && !db.prepare("SELECT id FROM bookings WHERE id = ?").get(sb.id)) {
+        insertBooking.run(
+          sb.id,
+          studentUser.id,
+          sb.venue_id,
+          sb.event_name,
+          sb.event_type,
+          sb.event_date,
+          sb.event_date,
+          sb.time_slot,
+          sb.start_time,
+          sb.end_time,
+          sb.attendee_count,
+          sb.purpose,
+          sb.status,
+          sb.status === "rejected" ? sb.admin_remark : null,
+          sb.admin_remark,
+          sb.reviewed_by,
+          sb.reviewed_by ? now : null,
+          now,
+          now
+        );
+      }
+    }
   }
 }
 
@@ -325,6 +531,7 @@ export function getVenues({ includeInactive = false } = {}) {
   return rows.map((r) => ({
     ...r,
     facilities: JSON.parse(r.facilities || "[]"),
+    images: r.images ? JSON.parse(r.images) : [],
     is_active: Boolean(r.is_active)
   }));
 }
@@ -335,23 +542,26 @@ export function getVenueById(id) {
   return {
     ...r,
     facilities: JSON.parse(r.facilities || "[]"),
+    images: r.images ? JSON.parse(r.images) : [],
     is_active: Boolean(r.is_active)
   };
 }
 
-export function createVenue({ name, category, location, capacity, facilities = [], description = "", color = "lavender", is_active = 1 }) {
+export function createVenue({ name, category, location, capacity, facilities = [], description = "", color = "lavender", images = [], is_active = 1 }) {
   const id = "v-" + crypto.randomUUID();
   const now = new Date().toISOString();
+  const facilitiesJson = JSON.stringify(facilities);
+  const imagesJson = JSON.stringify(Array.isArray(images) ? images : (images ? [images] : []));
 
   db.prepare(`
-    INSERT INTO venues (id, name, category, location, capacity, facilities, description, color, is_active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, name.trim(), category.trim(), location.trim(), Number(capacity), JSON.stringify(facilities), description.trim(), color, is_active ? 1 : 0, now, now);
+    INSERT INTO venues (id, name, category, location, capacity, facilities, description, color, images, is_active, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, name.trim(), category.trim(), location.trim(), Number(capacity), facilitiesJson, description.trim(), color, imagesJson, is_active ? 1 : 0, now, now);
 
   return getVenueById(id);
 }
 
-export function updateVenue(id, { name, category, location, capacity, facilities, description, color, is_active }) {
+export function updateVenue(id, { name, category, location, capacity, facilities, description, color, images, is_active }) {
   const venue = getVenueById(id);
   if (!venue) throw new Error("Venue not found");
 
@@ -362,16 +572,35 @@ export function updateVenue(id, { name, category, location, capacity, facilities
   const updatedFacilities = facilities !== undefined ? JSON.stringify(facilities) : JSON.stringify(venue.facilities);
   const updatedDesc = description !== undefined ? description.trim() : venue.description;
   const updatedColor = color !== undefined ? color : venue.color;
+  const updatedImages = images !== undefined ? JSON.stringify(Array.isArray(images) ? images : [images]) : JSON.stringify(venue.images || []);
   const updatedActive = is_active !== undefined ? (is_active ? 1 : 0) : (venue.is_active ? 1 : 0);
   const now = new Date().toISOString();
 
   db.prepare(`
     UPDATE venues
-    SET name = ?, category = ?, location = ?, capacity = ?, facilities = ?, description = ?, color = ?, is_active = ?, updated_at = ?
+    SET name = ?, category = ?, location = ?, capacity = ?, facilities = ?, description = ?, color = ?, images = ?, is_active = ?, updated_at = ?
     WHERE id = ?
-  `).run(updatedName, updatedCategory, updatedLocation, updatedCapacity, updatedFacilities, updatedDesc, updatedColor, updatedActive, now, id);
+  `).run(updatedName, updatedCategory, updatedLocation, updatedCapacity, updatedFacilities, updatedDesc, updatedColor, updatedImages, updatedActive, now, id);
 
   return getVenueById(id);
+}
+
+// ----------------- STUDENT ROSTER QUERIES -----------------
+
+export function getAllStudents() {
+  const query = `
+    SELECT u.id, u.prn, u.full_name, u.email, u.mobile, u.batch, u.sr_no, u.division, u.coordinator, u.account_status,
+           COUNT(b.id) as total_bookings,
+           SUM(CASE WHEN b.status = 'approved' THEN 1 ELSE 0 END) as approved_bookings,
+           SUM(CASE WHEN b.status = 'pending' THEN 1 ELSE 0 END) as pending_bookings,
+           SUM(CASE WHEN b.status = 'rejected' THEN 1 ELSE 0 END) as rejected_bookings
+    FROM users u
+    LEFT JOIN bookings b ON b.requester_id = u.id
+    WHERE u.role = 'student'
+    GROUP BY u.id
+    ORDER BY u.sr_no ASC, u.prn ASC
+  `;
+  return db.prepare(query).all();
 }
 
 // ----------------- BOOKING QUERIES -----------------
@@ -379,8 +608,8 @@ export function updateVenue(id, { name, category, location, capacity, facilities
 export function getBookingById(id) {
   const row = db.prepare(`
     SELECT b.*,
-           v.name as venue_name, v.category as venue_category, v.location as venue_location, v.capacity as venue_capacity, v.facilities as venue_facilities,
-           u.full_name as requester_name, u.role as requester_role, u.prn as requester_prn, u.email as requester_email, u.department as requester_department,
+           v.name as venue_name, v.category as venue_category, v.location as venue_location, v.capacity as venue_capacity, v.color as venue_color, v.facilities as venue_facilities, v.images as venue_images,
+           u.full_name as requester_name, u.role as requester_role, u.prn as requester_prn, u.email as requester_email, u.department as requester_department, u.batch as requester_batch, u.mobile as requester_mobile, u.sr_no as requester_sr_no, u.division as requester_division,
            rev.full_name as reviewer_name,
            doc.id as doc_id, doc.document_reference, doc.approval_reference, doc.generation_status as doc_status, doc.generated_at as doc_generated_at, doc.file_name as doc_file_name, doc.file_size as doc_file_size, doc.error_message as doc_error
     FROM bookings b
@@ -395,6 +624,7 @@ export function getBookingById(id) {
   return {
     ...row,
     facilities: row.venue_facilities ? (typeof row.venue_facilities === "string" ? JSON.parse(row.venue_facilities) : row.venue_facilities) : [],
+    images: row.venue_images ? (typeof row.venue_images === "string" ? JSON.parse(row.venue_images) : row.venue_images) : [],
     start_date: row.event_date,
     end_date: row.end_date || row.event_date,
     document: row.doc_id ? {
@@ -411,11 +641,11 @@ export function getBookingById(id) {
   };
 }
 
-export function getBookings({ userId = null, role = null, status = null, venue_id = null, date_from = null, date_to = null, search = null } = {}) {
+export function getBookings({ userId = null, role = null, status = null, venue_id = null, batch = null, date_group = null, date_from = null, date_to = null, search = null, sort_by = "event_date_desc" } = {}) {
   let query = `
     SELECT b.*,
-           v.name as venue_name, v.category as venue_category, v.location as venue_location, v.capacity as venue_capacity, v.facilities as venue_facilities,
-           u.full_name as requester_name, u.role as requester_role, u.prn as requester_prn, u.email as requester_email, u.department as requester_department,
+           v.name as venue_name, v.category as venue_category, v.location as venue_location, v.capacity as venue_capacity, v.color as venue_color, v.facilities as venue_facilities, v.images as venue_images,
+           u.full_name as requester_name, u.role as requester_role, u.prn as requester_prn, u.email as requester_email, u.department as requester_department, u.batch as requester_batch, u.mobile as requester_mobile, u.sr_no as requester_sr_no, u.division as requester_division,
            rev.full_name as reviewer_name,
            doc.id as doc_id, doc.document_reference, doc.approval_reference, doc.generation_status as doc_status, doc.generated_at as doc_generated_at, doc.file_name as doc_file_name, doc.file_size as doc_file_size, doc.error_message as doc_error
     FROM bookings b
@@ -444,27 +674,65 @@ export function getBookings({ userId = null, role = null, status = null, venue_i
     params.push(venue_id);
   }
 
-  if (date_from) {
-    query += " AND (b.end_date >= ? OR (b.end_date IS NULL AND b.event_date >= ?))";
-    params.push(date_from, date_from);
+  if (batch && batch !== "all") {
+    query += " AND u.batch = ?";
+    params.push(batch);
   }
 
-  if (date_to) {
-    query += " AND b.event_date <= ?";
-    params.push(date_to);
+  // Handle date grouping (Today, Tomorrow, This Week, Upcoming)
+  const now = new Date();
+  const todayStr = now.toISOString().split("T")[0];
+  const tomorrow = new Date(now.getTime() + 86400000);
+  const tomorrowStr = tomorrow.toISOString().split("T")[0];
+  const in7Days = new Date(now.getTime() + 7 * 86400000);
+  const in7DaysStr = in7Days.toISOString().split("T")[0];
+
+  if (date_group === "today") {
+    query += " AND b.event_date = ?";
+    params.push(todayStr);
+  } else if (date_group === "tomorrow") {
+    query += " AND b.event_date = ?";
+    params.push(tomorrowStr);
+  } else if (date_group === "this_week") {
+    query += " AND b.event_date >= ? AND b.event_date <= ?";
+    params.push(todayStr, in7DaysStr);
+  } else if (date_group === "upcoming") {
+    query += " AND b.event_date >= ?";
+    params.push(todayStr);
+  } else {
+    if (date_from) {
+      query += " AND (b.end_date >= ? OR (b.end_date IS NULL AND b.event_date >= ?))";
+      params.push(date_from, date_from);
+    }
+    if (date_to) {
+      query += " AND b.event_date <= ?";
+      params.push(date_to);
+    }
   }
 
   if (search) {
-    query += " AND (b.event_name LIKE ? OR b.id LIKE ? OR u.full_name LIKE ? OR v.name LIKE ?)";
+    query += " AND (b.event_name LIKE ? OR b.id LIKE ? OR u.full_name LIKE ? OR u.prn LIKE ? OR v.name LIKE ? OR b.purpose LIKE ?)";
     const s = `%${search}%`;
-    params.push(s, s, s, s);
+    params.push(s, s, s, s, s, s);
   }
 
-  query += " ORDER BY b.created_at DESC";
+  // Strict date ordering: default newest event date first, with selectable sort options
+  if (sort_by === "event_date_asc") {
+    query += " ORDER BY b.event_date ASC, b.start_time ASC, b.created_at ASC";
+  } else if (sort_by === "created_at_desc") {
+    query += " ORDER BY b.created_at DESC";
+  } else if (sort_by === "created_at_asc") {
+    query += " ORDER BY b.created_at ASC";
+  } else {
+    // Default: strictly sorted by event date newest first, then start_time, then submission timestamp
+    query += " ORDER BY b.event_date DESC, b.start_time DESC, b.created_at DESC";
+  }
+
   const rows = db.prepare(query).all(...params);
   return rows.map((r) => ({
     ...r,
     facilities: r.venue_facilities ? (typeof r.venue_facilities === "string" ? JSON.parse(r.venue_facilities) : r.venue_facilities) : [],
+    images: r.venue_images ? (typeof r.venue_images === "string" ? JSON.parse(r.venue_images) : r.venue_images) : [],
     start_date: r.event_date,
     end_date: r.end_date || r.event_date,
     document: r.doc_id ? {
@@ -481,7 +749,7 @@ export function getBookings({ userId = null, role = null, status = null, venue_i
   }));
 }
 
-export function createBooking({ requester_id, venue_id, event_name, event_type, start_date, end_date, event_date, start_time, end_time, attendee_count, purpose }) {
+export function createBooking({ requester_id, venue_id, event_name, event_type, start_date, end_date, event_date, time_slot = null, start_time, end_time, attendee_count, purpose }) {
   const venue = getVenueById(venue_id);
   if (!venue) throw new Error("Venue does not exist");
   if (!venue.is_active) throw new Error("Venue is currently inactive and cannot accept bookings");
@@ -495,16 +763,40 @@ export function createBooking({ requester_id, venue_id, event_name, event_type, 
   const startDate = start_date || event_date;
   const endDate = end_date || startDate;
 
+  // Resolve time slot defaults if slot provided but custom times not supplied
+  let startTime = start_time;
+  let endTime = end_time;
+  if (!startTime || !endTime) {
+    if (time_slot === "Morning" || time_slot === "Morning (09:00 AM - 12:00 PM)") {
+      startTime = "09:00";
+      endTime = "12:00";
+    } else if (time_slot === "Afternoon" || time_slot === "Afternoon (01:00 PM - 04:00 PM)") {
+      startTime = "13:00";
+      endTime = "16:00";
+    } else if (time_slot === "Evening" || time_slot === "Evening (04:00 PM - 07:00 PM)") {
+      startTime = "16:00";
+      endTime = "19:00";
+    } else if (time_slot === "Full Day" || time_slot === "Full Day (09:00 AM - 05:00 PM)") {
+      startTime = "09:00";
+      endTime = "17:00";
+    } else {
+      startTime = startTime || "10:00";
+      endTime = endTime || "11:00";
+    }
+  }
+
+  const slotLabel = time_slot || `${startTime} - ${endTime}`;
+
   if (endDate < startDate) {
     throw new Error("Ending date cannot be earlier than starting date");
   }
 
-  if (startDate === endDate && start_time >= end_time) {
+  if (startDate === endDate && startTime >= endTime) {
     throw new Error("Start time must be strictly earlier than end time");
   }
 
   // Check past date/time validation
-  const startDateTime = new Date(`${startDate}T${start_time}`);
+  const startDateTime = new Date(`${startDate}T${startTime}`);
   if (isNaN(startDateTime.getTime())) throw new Error("Invalid event date or time format");
   const now = new Date();
   if (startDateTime <= now) {
@@ -520,7 +812,7 @@ export function createBooking({ requester_id, venue_id, event_name, event_type, 
       AND b.status = 'approved'
       AND b.start_time < ?
       AND b.end_time > ?
-  `).get(venue_id, endDate, startDate, end_time, start_time);
+  `).get(venue_id, endDate, startDate, endTime, startTime);
 
   if (conflict) {
     const err = new Error(`Time slot conflict: Venue is already booked for "${conflict.event_name}" (${conflict.start_time} - ${conflict.end_time})`);
@@ -532,9 +824,9 @@ export function createBooking({ requester_id, venue_id, event_name, event_type, 
   const nowIso = new Date().toISOString();
 
   db.prepare(`
-    INSERT INTO bookings (id, requester_id, venue_id, event_name, event_type, event_date, end_date, start_time, end_time, attendee_count, purpose, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-  `).run(id, requester_id, venue_id, event_name.trim(), event_type.trim(), startDate, endDate, start_time, end_time, attendees, purpose.trim(), nowIso, nowIso);
+    INSERT INTO bookings (id, requester_id, venue_id, event_name, event_type, event_date, end_date, time_slot, start_time, end_time, attendee_count, purpose, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+  `).run(id, requester_id, venue_id, (event_name || purpose || "Facility Booking").trim(), (event_type || "Academic").trim(), startDate, endDate, slotLabel, startTime, endTime, attendees, purpose.trim(), nowIso, nowIso);
 
   return getBookingById(id);
 }
@@ -556,7 +848,7 @@ export function getBookingDocumentByRef(documentReference) {
 }
 
 // ATOMIC APPROVAL WITH CONCURRENCY, CONFLICT LOCKING & AUTOMATIC DOCUMENT GENERATION
-export function approveBooking({ bookingId, adminId, ipAddress = "127.0.0.1" }) {
+export function approveBooking({ bookingId, adminId, remark = "", ipAddress = "127.0.0.1" }) {
   // 1. Check current booking state
   const existing = db.prepare("SELECT * FROM bookings WHERE id = ?").get(bookingId);
   if (!existing) {
@@ -663,9 +955,9 @@ export function approveBooking({ bookingId, adminId, ipAddress = "127.0.0.1" }) 
     // 1. Commit approval status in bookings table
     db.prepare(`
       UPDATE bookings
-      SET status = 'approved', reviewed_by = ?, reviewed_at = ?, updated_at = ?
+      SET status = 'approved', admin_remark = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ?
       WHERE id = ?
-    `).run(adminId, now, now, bookingId);
+    `).run(remark || null, adminId, now, now, bookingId);
 
     // 2. Audit log
     const logId = "log-" + crypto.randomUUID();
@@ -921,9 +1213,9 @@ export function rejectBooking({ bookingId, adminId, reason, ipAddress = "127.0.0
 
     db.prepare(`
       UPDATE bookings
-      SET status = 'rejected', rejection_reason = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ?
+      SET status = 'rejected', rejection_reason = ?, admin_remark = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ?
       WHERE id = ?
-    `).run(reason.trim(), adminId, now, now, bookingId);
+    `).run(reason.trim(), reason.trim(), adminId, now, now, bookingId);
 
     // Audit log
     const logId = "log-" + crypto.randomUUID();

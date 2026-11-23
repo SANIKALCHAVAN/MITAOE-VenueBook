@@ -6,10 +6,20 @@ function venueBookExpressPlugin() {
   return {
     name: "mitaoe-venuebook-express-api",
     configureServer(server) {
-      server.middlewares.use(app);
+      server.middlewares.use((req, res, next) => {
+        if (req.url.startsWith("/api") || req.url.startsWith("/uploads") || req.url.startsWith("/imgs")) {
+          return app(req, res, next);
+        }
+        next();
+      });
     },
     configurePreviewServer(server) {
-      server.middlewares.use(app);
+      server.middlewares.use((req, res, next) => {
+        if (req.url.startsWith("/api") || req.url.startsWith("/uploads") || req.url.startsWith("/imgs")) {
+          return app(req, res, next);
+        }
+        next();
+      });
     }
   };
 }

@@ -1234,5 +1234,232 @@
   height: auto !important;
 }
 
+/* ==========================================================================
+   MITAOE SPECIFIC ENHANCEMENTS: HERO, ROLL CALL, DATE FILTERS, BATCH BADGES
+   ========================================================================== */
+
+/* Photographic Hero Background using Provided MITAOE Building Image */
+.hero-box.mitaoe-hero-bg {
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.88) 0%, rgba(30, 27, 75, 0.82) 45%, rgba(15, 23, 42, 0.92) 100%),
+              url('/mitaoe-campus-hero.jpg') center/cover no-repeat !important;
+  border: 1px solid rgba(255, 255, 255, 0.18) !important;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.45) !important;
+  color: #ffffff;
+  position: relative;
+}
+
+.hero-box.mitaoe-hero-bg .hero-badge {
+  background: rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  color: #fde047; /* Gold accent */
+  font-weight: 700;
+}
+
+.hero-box.mitaoe-hero-bg .hero-title {
+  color: #ffffff;
+}
+
+.hero-box.mitaoe-hero-bg .hero-title span {
+  color: #38bdf8; /* Sky blue */
+}
+
+.hero-box.mitaoe-hero-bg .hero-subtitle {
+  color: #cbd5e1;
+}
+
+.hero-box.mitaoe-hero-bg .hero-visual-card {
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.3);
+}
+
+/* Institutional Batch Badges matching Roll Call PDF exactly */
+.batch-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  letter-spacing: 0.5px;
+}
+.batch-pill-A1 {
+  background: #ffedd5;
+  color: #c2410c;
+  border: 1px solid #fed7aa;
+}
+.batch-pill-A2 {
+  background: #dcfce7;
+  color: #15803d;
+  border: 1px solid #bbf7d0;
+}
+.batch-pill-A3 {
+  background: #e0f2fe;
+  color: #0369a1;
+  border: 1px solid #bae6fd;
+}
+
+/* Date-Wise Quick Filtering Bar */
+.date-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 12px 0 16px;
+}
+.date-filter-pill {
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  color: #64748b;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.date-filter-pill:hover {
+  background: #f8fafc;
+  color: var(--purple);
+  border-color: #cbd5e1;
+}
+.date-filter-pill.active {
+  background: var(--purple);
+  color: #ffffff;
+  border-color: var(--purple);
+  box-shadow: 0 2px 8px rgba(101, 88, 232, 0.25);
+}
+
+/* Excel Export Button */
+.button-excel {
+  background: #0f766e !important;
+  color: #ffffff !important;
+  border: 1px solid #115e59 !important;
+  box-shadow: 0 4px 12px rgba(15, 118, 110, 0.2) !important;
+}
+.button-excel:hover {
+  background: #115e59 !important;
+  color: #ffffff !important;
+}
+
+/* Slot Selection Pills in Booking Form */
+.slot-pill-group {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-top: 4px;
+}
+.slot-pill {
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+.slot-pill:hover {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+.slot-pill.active {
+  background: #f0efff;
+  border-color: var(--purple);
+  box-shadow: 0 0 0 1px var(--purple);
+}
+.slot-pill strong {
+  display: block;
+  font-size: 11px;
+  color: #1e293b;
+}
+.slot-pill span {
+  display: block;
+  font-size: 10px;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+/* Roll Call Table */
+.rollcall-container {
+  max-height: 520px;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+}
+.rollcall-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.rollcall-table th {
+  position: sticky;
+  top: 0;
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  padding: 12px 14px;
+  border-bottom: 2px solid #e2e8f0;
+  text-align: left;
+  z-index: 2;
+}
+.rollcall-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #334155;
+}
+.rollcall-table tr:hover {
+  background: #f8fafc;
+}
+.rollcall-sr {
+  font-weight: 800;
+  color: #64748b;
+  font-size: 11px;
+}
+.rollcall-prn {
+  font-family: monospace;
+  font-weight: 700;
+  color: #1e293b;
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.rollcall-name {
+  font-weight: 700;
+  color: #0f172a;
+}
+.rollcall-contact {
+  font-size: 11px;
+  color: #64748b;
+}
+
+/* Room Gallery Preview */
+.room-gallery-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  margin-top: 8px;
+}
+.room-gallery-thumb {
+  width: 80px;
+  height: 60px;
+  border-radius: 6px;
+  object-fit: cover;
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+.room-gallery-thumb.active {
+  border-color: var(--purple);
+}
+
 
 

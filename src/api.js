@@ -52,10 +52,10 @@ async function request(endpoint, options = {}) {
 
 export const api = {
   // Auth
-  async loginStudent(prn, password) {
+  async loginStudent(prn, password = "") {
     const data = await request("/api/auth/student-login", {
       method: "POST",
-      body: JSON.stringify({ prn, password })
+      body: JSON.stringify({ prn: prn?.trim(), password })
     });
     setStoredToken(data.token);
     return data;
@@ -121,11 +121,63 @@ export const api = {
     });
   },
 
+  // Students (TY Div-A Roll Call Roster)
+  async getStudents() {
+    return request("/api/students");
+  },
+
+  // Photo Upload
+  async uploadPhoto(dataUrl) {
+    return request("/api/upload", {
+      method: "POST",
+      body: JSON.stringify({ dataUrl })
+    });
+  },
+
+  // Excel Report Download
+  async downloadExcel(params = {}) {
+    const token = getStoredToken();
+    const searchParams = new URLSearchParams();
+    if (params.status && params.status !== "all") searchParams.set("status", params.status);
+    if (params.venue_id && params.venue_id !== "all") searchParams.set("venue_id", params.venue_id);
+    if (params.batch && params.batch !== "all") searchParams.set("batch", params.batch);
+    if (params.date_group && params.date_group !== "all") searchParams.set("date_group", params.date_group);
+    if (params.date_from) searchParams.set("date_from", params.date_from);
+    if (params.date_to) searchParams.set("date_to", params.date_to);
+
+    const qs = searchParams.toString();
+    const url = `/api/export/excel${qs ? `?${qs}` : ""}`;
+
+    const res = await fetch(url, {
+      headers: {
+        Authorization: token ? `Bearer ${token}` : ""
+      }
+    });
+    if (!res.ok) throw new Error("Excel export failed");
+
+    const blob = await res.blob();
+    const blobUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = `MITAOE_Room_Booking_Report_${new Date().toISOString().split("T")[0]}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      try {
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(blobUrl);
+      } catch {}
+    }, 1500);
+  },
+
   // Bookings
   async getBookings(params = {}) {
     const searchParams = new URLSearchParams();
     if (params.status && params.status !== "all") searchParams.set("status", params.status);
     if (params.venue_id && params.venue_id !== "all") searchParams.set("venue_id", params.venue_id);
+    if (params.batch && params.batch !== "all") searchParams.set("batch", params.batch);
+    if (params.date_group && params.date_group !== "all") searchParams.set("date_group", params.date_group);
+    if (params.sort_by) searchParams.set("sort_by", params.sort_by);
     if (params.date_from) searchParams.set("date_from", params.date_from);
     if (params.date_to) searchParams.set("date_to", params.date_to);
     if (params.search) searchParams.set("search", params.search);
@@ -141,10 +193,10 @@ export const api = {
     });
   },
 
-  async updateBookingStatus(bookingId, status, reason = "") {
+  async updateBookingStatus(bookingId, status, reason = "", adminRemark = "") {
     return request(`/api/bookings/${bookingId}/status`, {
       method: "PUT",
-      body: JSON.stringify({ status, reason })
+      body: JSON.stringify({ status, reason, remark: adminRemark, admin_remark: adminRemark })
     });
   },
 

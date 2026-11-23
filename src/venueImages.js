@@ -1,9 +1,9 @@
-import auditoriumImg from "../imgs/Modern Auditorium Conference Hall.png";
-import innovationImg from "../imgs/Modern High-Tech Innovation Room.png";
-import seminarAImg from "../imgs/Modern Seminar Hall A.png";
-import seminarBImg from "../imgs/Modern Seminar Hall B.png";
-import boardroomImg from "../imgs/Modern Wood-Toned Corporate Boardroom.png";
-import activityImg from "../imgs/Spacious Modern Activity Hall.png";
+const auditoriumImg = "/imgs/Modern Auditorium Conference Hall.png";
+const innovationImg = "/imgs/Modern High-Tech Innovation Room.png";
+const seminarAImg = "/imgs/Modern Seminar Hall A.png";
+const seminarBImg = "/imgs/Modern Seminar Hall B.png";
+const boardroomImg = "/imgs/Modern Wood-Toned Corporate Boardroom.png";
+const activityImg = "/imgs/Spacious Modern Activity Hall.png";
 
 /**
  * Centralized mapping configuration for MITAOE Campus Venues.
